@@ -1,45 +1,55 @@
+#!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
+
 from sensor_msgs.msg import PointCloud2
-from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
+
 import numpy as np
 import pcl
 import tf2_ros
 from tf2_ros import TransformException, ConnectivityException
 from typing import List, Tuple, Union
+
 from custom_msgs.msg import DetectedSurfaces, DetectedObjects
 
 
-class Perception(Node):
+class TrayAndCupholderPerception(Node):
+    """
+    Detects:
+      • Tray (as a plane/circular surface) → publishes /tray_marker (green cylinders) and /tray_detected
+      • Cup-holders (as cylinders)         → publishes /cup_holder_marker (blue cylinders) and /cup_holder_detected
+    """
     def __init__(self) -> None:
-        super().__init__('cup_and_cupholder_detection_node')
+        super().__init__('tray_and_cupholder_detection_node')
 
-        self.pc_sub_table = self.create_subscription(
-            PointCloud2, '/camera_depth_sensor/points', self.callback_table_and_cups, 10)
-
+        # Subscribe ONLY to the wrist depth cloud
         self.pc_sub_wrist = self.create_subscription(
-            PointCloud2, '/wrist_rgbd_depth_sensor/points', self.callback_tray_and_cupholders, 10)
+            PointCloud2, '/wrist_rgbd_depth_sensor/points',
+            self.callback_tray_and_cupholders, 10
+        )
 
-        self.table_marker_pub      = self.create_publisher(MarkerArray, '/table_marker', 10)         # squared surfaces
-        self.cup_marker_pub        = self.create_publisher(MarkerArray, '/cup_marker', 10)
-        self.tray_marker_pub       = self.create_publisher(MarkerArray, '/tray_marker', 10)          # circular surfaces
+        # Publishers for markers and detections
+        self.tray_marker_pub       = self.create_publisher(MarkerArray, '/tray_marker', 10)           # circular surfaces
         self.cupholder_marker_pub  = self.create_publisher(MarkerArray, '/cup_holder_marker', 10)
 
-        self.table_detected_pub    = self.create_publisher(DetectedSurfaces, '/table_detected', 10)
         self.tray_detected_pub     = self.create_publisher(DetectedSurfaces, '/tray_detected', 10)
-        self.object_detected_pub   = self.create_publisher(DetectedObjects,  '/cup_detected', 10)
         self.cuph_detected_pub     = self.create_publisher(DetectedObjects,  '/cup_holder_detected', 10)
 
+        # TF
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+    # ------------ Utilities ------------
 
     def from_ros_msg(self, msg: PointCloud2) -> Union[pcl.PointCloud, None]:
         """Converts a ROS2 PointCloud2 message to a PCL point cloud (in base_link)."""
         try:
             tf = self.tf_buffer.lookup_transform(
                 'base_link', msg.header.frame_id,
-                rclpy.time.Time(), timeout=rclpy.time.Duration(seconds=1.0))
+                rclpy.time.Time(), timeout=Duration(seconds=1.0)
+            )
 
             t = np.array([tf.transform.translation.x,
                           tf.transform.translation.y,
@@ -55,9 +65,9 @@ class Perception(Node):
             pts = []
             for i in range(n):
                 s = i * step
-                x = np.frombuffer(msg.data[s:s+4],       dtype=np.float32)[0]
-                y = np.frombuffer(msg.data[s+4:s+8],     dtype=np.float32)[0]
-                z = np.frombuffer(msg.data[s+8:s+12],    dtype=np.float32)[0]
+                x = np.frombuffer(msg.data[s:s+4],       dtype=np.float32, count=1)[0]
+                y = np.frombuffer(msg.data[s+4:s+8],     dtype=np.float32, count=1)[0]
+                z = np.frombuffer(msg.data[s+8:s+12],    dtype=np.float32, count=1)[0]
                 p_rel = R @ np.array([x, y, z], dtype=np.float32) + t
                 pts.append(p_rel)
 
@@ -67,6 +77,7 @@ class Perception(Node):
             cloud = pcl.PointCloud()
             cloud.from_array(arr)
             return cloud
+
         except (TransformException, ConnectivityException) as e:
             self.get_logger().error(f"Transform lookup failed: {e}")
             return None
@@ -86,7 +97,7 @@ class Perception(Node):
                      min_x: float, max_x: float,
                      min_y: float, max_y: float,
                      min_z: float, max_z: float) -> Union[pcl.PointCloud, None]:
-        """Axis-aligned ROI filter (used by both pipelines)."""
+        """Axis-aligned ROI filter."""
         try:
             idx = []
             for i in range(cloud.size):
@@ -100,7 +111,7 @@ class Perception(Node):
             self.get_logger().error(f"Error in filter_cloud: {e}")
             return None
 
-    def extract_plane(self, cloud: pcl.PointCloud, use_normals: bool = False) -> Tuple[np.ndarray, np.ndarray, pcl.PointCloud]:
+    def extract_plane(self, cloud: pcl.PointCloud, use_normals: bool = True) -> Tuple[np.ndarray, np.ndarray, pcl.PointCloud]:
         """RANSAC plane extraction (with or without normals)."""
         seg = cloud.make_segmenter_normals(ksearch=50) if use_normals else cloud.make_segmenter()
         if use_normals:
@@ -113,7 +124,7 @@ class Perception(Node):
         return indices, coeffs, plane_cloud
 
     def extract_clusters(self, cloud: pcl.PointCloud, tol: float, min_sz: int, max_sz: int):
-        """Euclidean clustering (kept from both scripts)."""
+        """Euclidean clustering."""
         tree = cloud.make_kdtree()
         ec = cloud.make_EuclideanClusterExtraction()
         ec.set_ClusterTolerance(tol)
@@ -134,7 +145,7 @@ class Perception(Node):
         return clusters, centroids, dims
 
     def extract_cylinder(self, cloud, max_cupholder=4, min_distance=0.05):
-        """Segmentation: Extracts cylindrical cup-holders from the point cloud."""
+        """Extract cylindrical cup-holders."""
         cup_idx, cup_coeffs, cup_centroids = [], [], []
         work = cloud
         for _ in range(max_cupholder):
@@ -172,30 +183,7 @@ class Perception(Node):
             cyl = pcl.PointCloud()
         return filt_i, cup_coeffs, cyl
 
-    def callback_table_and_cups(self, msg: PointCloud2) -> None:
-        try:
-            cloud = self.from_ros_msg(msg)
-            if cloud is None or cloud.size == 0:
-                return
-
-            table_roi = self.filter_cloud(cloud, -0.1, 0.4, 0.0, 0.75, -0.1, 0.02)
-            cups_roi  = self.filter_cloud(cloud, -0.1, 0.4, 0.2, 0.7,   0.0,  0.1)
-            if table_roi is None or cups_roi is None:
-                return
-
-            _, _, plane_cloud = self.extract_plane(table_roi, use_normals=False)
-
-            _, surf_centroids, surf_dims = self.extract_clusters(plane_cloud, tol=0.02, min_sz=100, max_sz=200000)
-            _, obj_centroids,  obj_dims  = self.extract_clusters(cups_roi,   tol=0.02, min_sz=100, max_sz=200000)
-
-            self.pub_squared_surface_markers(surf_centroids, surf_dims)
-            self.pub_cup_markers(obj_centroids, obj_dims)
-
-            self.pub_surfaces_detected('/table_detected', self.table_detected_pub, surf_centroids, surf_dims)
-            self.pub_objects_detected('/cup_detected',    self.object_detected_pub, obj_centroids, obj_dims)
-
-        except Exception as e:
-            self.get_logger().error(f"[A] Error in callback: {e}")
+    # ------------ Core callback (only wrist cloud) ------------
 
     def callback_tray_and_cupholders(self, msg: PointCloud2) -> None:
         try:
@@ -203,66 +191,35 @@ class Perception(Node):
             if cloud is None or cloud.size == 0:
                 return
 
+            # Tuned ROIs (adjust to your setup):
+            # Tray region (plane-ish circular surface under holders)
             tray_roi = self.filter_cloud(cloud, -0.6, -0.2, -0.2, 0.2,  -0.65, -0.54)
+            # Cup-holder region (where the cylinders stand)
             cuph_roi = self.filter_cloud(cloud, -0.55, -0.25, -0.15, 0.15, -0.63, -0.55)
             if tray_roi is None or cuph_roi is None:
                 return
 
+            # Extract tray plane
             _, _, tray_cloud = self.extract_plane(tray_roi, use_normals=True)
+            # Extract cup-holder cylinders
             _, _, cuph_cloud = self.extract_cylinder(cuph_roi)
 
+            # Cluster both to get centroids/dimensions
             _, tray_centroids, tray_dims = self.extract_clusters(tray_cloud, tol=0.04, min_sz=30, max_sz=100000)
             _, ch_centroids,   ch_dims   = self.extract_clusters(cuph_cloud, tol=0.04, min_sz=30, max_sz=100000)
 
+            # Markers
             self.pub_circular_surface_markers(tray_centroids, tray_dims)
             self.pub_cup_holder_markers(ch_centroids, ch_dims)
 
-            self.pub_surfaces_detected('/tray_detected', self.tray_detected_pub, tray_centroids, tray_dims)
-            self.pub_objects_detected('/cup_holder_detected', self.cuph_detected_pub, ch_centroids, ch_dims,
-                                      fixed_height=0.035)
+            # Messages
+            self.pub_surfaces_detected(self.tray_detected_pub, tray_centroids, tray_dims)
+            self.pub_objects_detected(self.cuph_detected_pub, ch_centroids, ch_dims, fixed_height=0.035)
 
         except Exception as e:
-            self.get_logger().error(f"[B] Error in callback: {e}")
+            self.get_logger().error(f"[Tray/Cupholders] Error in callback: {e}")
 
-    def pub_squared_surface_markers(self, centroids, dims):
-        """Publish table (squared) surfaces as green cubes."""
-        ma = MarkerArray()
-        thickness = 0.05
-        for i, (c, d) in enumerate(zip(centroids, dims)):
-            m = Marker()
-            m.header.frame_id = "base_link"
-            m.id = i
-            m.type = Marker.CUBE
-            m.action = Marker.ADD
-            m.pose.position.x, m.pose.position.y = float(c[0]), float(c[1])
-            m.pose.position.z = float(c[2]) - thickness / 2.0
-            m.pose.orientation.w = 1.0
-            m.scale.x, m.scale.y, m.scale.z = float(d[0]), float(d[1]), thickness
-            m.color.r, m.color.g, m.color.b, m.color.a = 0.0, 1.0, 0.0, 0.5
-            ma.markers.append(m)
-        if ma.markers:
-            self.table_marker_pub.publish(ma)
-
-    def pub_cup_markers(self, centroids, dims):
-        """Publish cups as red cylinders."""
-        ma = MarkerArray()
-        for i, (c, d) in enumerate(zip(centroids, dims)):
-            dia = float(max(d[0], d[1]))
-            m = Marker()
-            m.header.frame_id = "base_link"
-            m.id = i
-            m.type = Marker.CYLINDER
-            m.action = Marker.ADD
-            m.pose.position.x = float(c[0]) - dia / 4.0
-            m.pose.position.y = float(c[1]) - 0.016
-            m.pose.position.z = float(c[2])
-            m.pose.orientation.w = 1.0
-            m.scale.x = m.scale.y = dia
-            m.scale.z = float(d[2])
-            m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.0, 0.0, 0.5
-            ma.markers.append(m)
-        if ma.markers:
-            self.cup_marker_pub.publish(ma)
+    # ------------ Publishing helpers ------------
 
     def pub_circular_surface_markers(self, centroids, dims):
         """Publish tray (circular) surfaces as green cylinders."""
@@ -305,8 +262,8 @@ class Perception(Node):
         if ma.markers:
             self.cupholder_marker_pub.publish(ma)
 
-    def pub_surfaces_detected(self, tag, pub, centroids, dims):
-        """Publish DetectedSurfaces to the given publisher."""
+    def pub_surfaces_detected(self, pub, centroids, dims):
+        """Publish DetectedSurfaces (tray)."""
         if pub is None:
             return
         for i, (c, d) in enumerate(zip(centroids, dims)):
@@ -316,17 +273,15 @@ class Perception(Node):
             m.height, m.width = float(d[0]), float(d[1])
             pub.publish(m)
 
-    def pub_objects_detected(self, tag, pub, centroids, dims, fixed_height: float = None):
-        """Publish DetectedObjects (cups or cup-holders)."""
+    def pub_objects_detected(self, pub, centroids, dims, fixed_height: float = None):
+        """Publish DetectedObjects (cup-holders)."""
         if pub is None:
             return
         for i, (c, d) in enumerate(zip(centroids, dims)):
             dia = float(max(d[0], d[1]))
             m = DetectedObjects()
             m.object_id = i
-            m.position.x = float(c[0]) - (dia / 4.0 if tag == '/cup_detected' else 0.0)
-            m.position.y = float(c[1]) - (0.016 if tag == '/cup_detected' else 0.0)
-            m.position.z = float(c[2])
+            m.position.x, m.position.y, m.position.z = float(c[0]), float(c[1]), float(c[2])
             m.width = dia
             m.thickness = dia
             m.height = float(d[2]) if fixed_height is None else fixed_height
@@ -335,7 +290,7 @@ class Perception(Node):
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = Perception()
+    node = TrayAndCupholderPerception()
     rclpy.spin(node)
     rclpy.shutdown()
 

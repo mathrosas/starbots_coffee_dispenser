@@ -467,18 +467,6 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Name: Cup marker
-      Namespaces:
-        "": true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /cup_marker
-      Value: true
-    - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
       Name: Cup holder marker
       Namespaces:
         "": true
@@ -488,18 +476,6 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /cup_holder_marker
-      Value: true
-    - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
-      Name: Table marker
-      Namespaces:
-        "": true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /table_marker
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true

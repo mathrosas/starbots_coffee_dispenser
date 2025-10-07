@@ -32,6 +32,8 @@ endif()
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedSurfaces.msg"
   "msg/DetectedObjects.msg"
+  "msg/DetectedCupholder.msg"
+  "msg/DetectedCupholders.msg"
   DEPENDENCIES geometry_msgs std_msgs
 )
 
