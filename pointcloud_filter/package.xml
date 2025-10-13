@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>pointcloud_filter</name>
+  <version>0.0.0</version>
+  <description>PointCloud filtering node to remove LiDAR rings and robot points, and to project to LaserScan.</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- Build Dependencies -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>rclcpp</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>pcl_conversions</build_depend>
+  <build_depend>PCL</build_depend>
+
+  <!-- Run Dependencies -->
+  <exec_depend>rclcpp</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>pcl_conversions</exec_depend>
+  <exec_depend>PCL</exec_depend>
+
+  <!-- Test dependencies if needed -->
+  <test_depend>ament_lint_auto</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+
