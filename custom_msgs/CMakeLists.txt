@@ -34,8 +34,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedObjects.msg"
   "msg/InferenceResult.msg"
   "msg/Yolov11Inference.msg"
+  "msg/SegmentationResult.msg"
+  "msg/Yolov11Segmentation.msg"
   DEPENDENCIES geometry_msgs std_msgs
 )
-
 
 ament_package()

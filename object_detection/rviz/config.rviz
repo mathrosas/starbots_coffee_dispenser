@@ -429,7 +429,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /camera_depth_sensor/image_raw
+        Value: /inference_result
       Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
