@@ -2,7 +2,8 @@
 from ultralytics import YOLO
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from custom_msgs.msg import InferenceResult, SegmentationResult, Yolov11Inference, Yolov11Segmentation
 import cv2
@@ -16,7 +17,6 @@ class YoloObjectDetection(Node):
         # --- Models ---
         # Keep your original detector (optional – we now use the seg model for both boxes+masks)
         self.det_model = YOLO('/home/user/ros2_ws/src/starbot_coffee_dispenser/object_detection/data/yolo11n.pt')
-
         self.model = YOLO('/home/user/ros2_ws/src/starbot_coffee_dispenser/object_detection/data/yolo11n-seg.pt')
 
         self.bridge = CvBridge()
@@ -35,8 +35,18 @@ class YoloObjectDetection(Node):
             f'cup_id={self.cup_id} min_conf={self.min_conf} classes_filter={self.classes_filter} imgsz={self.imgsz}'
         )
 
+        # --- Camera intrinsics & depth cache ---
+        self.fx = self.fy = self.cx = self.cy = None
+        self.depth_img = None
+        self.depth_frame_id = None
+
         # --- ROS I/O ---
+        # RGB image
         self.sub = self.create_subscription(Image, '/camera_depth_sensor/image_raw', self.camera_callback, 10)
+        # Depth (aligned to RGB)
+        self.sub_depth = self.create_subscription(Image, '/camera_depth_sensor/depth/image_raw', self.depth_callback, 10)
+        # Camera intrinsics
+        self.sub_info = self.create_subscription(CameraInfo, '/camera_depth_sensor/camera_info', self.info_callback, 10)
 
         # Detections (boxes)
         self.pub_det_msg  = self.create_publisher(Yolov11Inference, '/Yolov11_Inference', 1)
@@ -45,6 +55,9 @@ class YoloObjectDetection(Node):
         # Segmentations (masks)
         self.pub_seg_msg  = self.create_publisher(Yolov11Segmentation, '/Yolov11_segmentation', 1)
         self.pub_seg_img  = self.create_publisher(Image, '/segmentation_result', 1)
+
+        # Cup pose
+        self.pub_pose = self.create_publisher(PoseStamped, '/cup_pose', 1)
 
     # ---------------- utils ----------------
     def _resolve_class_id(self, names, target: str):
@@ -67,7 +80,21 @@ class YoloObjectDetection(Node):
             return str(names[cid])
         return str(cid)
 
-    # --------------- callback ---------------
+    # --------------- info/depth callbacks ---------------
+    def info_callback(self, msg: CameraInfo) -> None:
+        K = msg.k  # [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+        self.fx, self.fy, self.cx, self.cy = float(K[0]), float(K[4]), float(K[2]), float(K[5])
+
+    def depth_callback(self, msg: Image) -> None:
+        try:
+            depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except Exception as e:
+            self.get_logger().error(f'Depth CvBridge conversion failed: {e}')
+            return
+        self.depth_img = depth
+        self.depth_frame_id = msg.header.frame_id
+
+    # --------------- main RGB callback ---------------
     def camera_callback(self, msg: Image) -> None:
         # ROS -> OpenCV
         try:
@@ -110,8 +137,10 @@ class YoloObjectDetection(Node):
         seg_msg.header = msg.header
 
         kept = 0
+        kept_idxs = []
         annotated = r0.plot()  # Ultralytics draws boxes + masks when present
 
+        xyxy = confs = clses = None
         if boxes is not None and len(boxes) > 0:
             xyxy  = boxes.xyxy.cpu().numpy().astype(np.float32)
             confs = boxes.conf.cpu().numpy().astype(np.float32) if boxes.conf is not None else np.zeros((len(xyxy),), np.float32)
@@ -122,6 +151,7 @@ class YoloObjectDetection(Node):
                 if self._name_from_id(int(cls_id)).lower() != self.target_label or float(score) < self.min_conf:
                     continue
                 kept += 1
+                kept_idxs.append(idx)
 
                 # ----- detection record -----
                 det = InferenceResult()
@@ -135,7 +165,7 @@ class YoloObjectDetection(Node):
                 if hasattr(det, 'score'):    det.score    = float(score)
                 det_msg.yolov11_inference.append(det)
 
-                # ----- segmentation record (use box center/size like your example) -----
+                # ----- segmentation record (bbox center/size) -----
                 seg = SegmentationResult()
                 seg.class_id   = int(cls_id)
                 seg.class_name = det.class_name
@@ -150,17 +180,86 @@ class YoloObjectDetection(Node):
         else:
             self.get_logger().info(f'kept {kept} {self.target_label}(s) with conf ≥ {self.min_conf:.2f}')
 
-        # ---------------- publish ----------------
-        # Annotated image (boxes + masks)
+        # ---------------- publish images & structured messages ----------------
         seg_img = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
         seg_img.header = msg.header
-        self.pub_seg_img.publish(seg_img)  # /segmentation_result
-        self.pub_det_img.publish(seg_img)  # also push to /inference_result for convenience
-
-        # Structured messages
+        self.pub_seg_img.publish(seg_img)   # /segmentation_result
+        self.pub_det_img.publish(seg_img)   # /inference_result
         self.pub_det_msg.publish(det_msg)
         self.pub_seg_msg.publish(seg_msg)
 
+        # ---------------- pose estimation (best cup) ----------------
+        if kept == 0:
+            return
+        if self.depth_img is None or self.fx is None:
+            self.get_logger().warn('Depth and/or CameraInfo not ready; skipping pose publish.')
+            return
+
+        # Pick the highest-confidence kept detection
+        best_idx = max(kept_idxs, key=lambda i: float(confs[i]) if confs is not None else 0.0)
+
+        # Make a binary mask for that detection (prefer instance mask, else bbox)
+        H_rgb, W_rgb = img.shape[:2]
+        mask = None
+        if masks is not None and hasattr(masks, "data") and masks.data is not None and masks.data.shape[0] > best_idx:
+            m = masks.data[best_idx].cpu().numpy()  # (Hm, Wm) in [0..1]
+            mask = (cv2.resize(m, (W_rgb, H_rgb), interpolation=cv2.INTER_NEAREST) > 0.5)
+        else:
+            x1, y1, x2, y2 = xyxy[best_idx]
+            mask = np.zeros((H_rgb, W_rgb), dtype=bool)
+            mask[int(max(0, y1)):int(min(H_rgb, y2)), int(max(0, x1)):int(min(W_rgb, x2))] = True
+
+        # Match depth resolution if different
+        depth = self.depth_img
+        H_d, W_d = depth.shape[:2]
+        if (H_d, W_d) != (H_rgb, W_rgb):
+            mask = cv2.resize(mask.astype(np.uint8), (W_d, H_d), interpolation=cv2.INTER_NEAREST).astype(bool)
+
+        # Depth values inside mask
+        d = depth[mask]
+        if d.size == 0:
+            self.get_logger().warn('Mask contains no pixels in depth frame; skipping pose publish.')
+            return
+
+        # Convert to meters (supports 16U in mm and 32F in m)
+        if d.dtype == np.uint16 or d.dtype == np.uint32:
+            Z_vals = d.astype(np.float32) * 0.001
+        else:
+            Z_vals = d.astype(np.float32)
+
+        # Clean depths
+        Z_vals = Z_vals[np.isfinite(Z_vals) & (Z_vals > 0.05) & (Z_vals < 10.0)]
+        if Z_vals.size == 0:
+            self.get_logger().warn('All depths invalid within mask; skipping pose publish.')
+            return
+
+        Z = float(np.median(Z_vals))
+
+        # Use mask median pixel (u,v) for robustness
+        ys, xs = np.nonzero(mask)
+        if xs.size == 0:
+            self.get_logger().warn('Mask had no True pixels after resize; skipping pose publish.')
+            return
+        u = float(np.median(xs))
+        v = float(np.median(ys))
+
+        # Back-project to 3D in camera optical frame
+        X = (u - self.cx) * Z / self.fx
+        Y = (v - self.cy) * Z / self.fy
+
+        pose = PoseStamped()
+        pose.header.frame_id = self.depth_frame_id if self.depth_frame_id else msg.header.frame_id
+        pose.header.stamp = msg.header.stamp
+        pose.pose.position.x = X
+        pose.pose.position.y = Y
+        pose.pose.position.z = Z
+        pose.pose.orientation.x = 0.0
+        pose.pose.orientation.y = 0.0
+        pose.pose.orientation.z = 0.0
+        pose.pose.orientation.w = 1.0
+
+        self.pub_pose.publish(pose)
+        self.get_logger().info(f'cup pose -> frame={pose.header.frame_id} pos=({X:.3f}, {Y:.3f}, {Z:.3f})')
 
 def main(args=None) -> None:
     rclpy.init(args=args)
