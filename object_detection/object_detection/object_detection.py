@@ -80,6 +80,7 @@ class TrayAndCupholderPerception(Node):
 
         # --- TF ---
         self.tf_buffer = tf2_ros.Buffer()
+               # Listener must be kept alive by the node
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
     # ------------ Core callback ------------
@@ -380,7 +381,8 @@ class TrayAndCupholderPerception(Node):
             txt.pose.position.x, txt.pose.position.y, txt.pose.position.z = float(c[0]), float(c[1]), float(c[2]) + text_h
             txt.pose.orientation.w = 1.0
             txt.scale.x = txt.scale.y = txt.scale.z = 0.05
-            txt.color.r = txt.color.g = txt.color.b = txt.color.a = 1.0
+            # CHANGED: make numbers blue like the cylinders (same alpha as cyl)
+            txt.color.r, txt.color.g, txt.color.b, txt.color.a = 0.0, 0.0, 1.0, 0.9
             ma.markers.append(txt)
 
             # publish DetectedObjects individually (as your original)

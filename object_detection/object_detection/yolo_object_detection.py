@@ -43,9 +43,9 @@ class YoloObjectDetection(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # --- ROS I/O ---
-        self.sub       = self.create_subscription(Image, '/camera_depth_sensor/image_raw', self.camera_callback, 10)
-        self.sub_depth = self.create_subscription(Image, '/camera_depth_sensor/depth/image_raw', self.depth_callback, 10)
-        self.sub_info  = self.create_subscription(CameraInfo, '/camera_depth_sensor/camera_info', self.info_callback, 10)
+        self.sub       = self.create_subscription(Image, '/wrist_rgbd_depth_sensor/image_raw', self.camera_callback, 10)
+        self.sub_depth = self.create_subscription(Image, '/wrist_rgbd_depth_sensor/depth/image_raw', self.depth_callback, 10)
+        self.sub_info  = self.create_subscription(CameraInfo, '/wrist_rgbd_depth_sensor/camera_info', self.info_callback, 10)
 
         self.pub_det_msg = self.create_publisher(Yolov11Inference, '/Yolov11_Inference', 1)
         self.pub_det_img = self.create_publisher(Image, '/inference_result', 1)

@@ -21,13 +21,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    yolo_object_detection = Node(
-        package='object_detection',
-        executable='yolo_object_detection',
-        name='yolo_object_detection',
-        output='screen'
-    )
-
     rviz = Node(
         package='rviz2',
         executable='rviz2',
@@ -36,4 +29,4 @@ def generate_launch_description():
         arguments=['-d', rviz_config]
     )
 
-    return LaunchDescription([pointcloud_filter, object_detection, yolo_object_detection, rviz])
+    return LaunchDescription([pointcloud_filter, object_detection, rviz])

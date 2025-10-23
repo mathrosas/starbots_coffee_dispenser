@@ -17,9 +17,9 @@ find_package(moveit_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 
-add_executable(pick_and_place_perception src/pick_and_place_perception.cpp)
+add_executable(object_manipulation src/object_manipulation.cpp)
 
-ament_target_dependencies(pick_and_place_perception
+ament_target_dependencies(object_manipulation
   rclcpp
   geometry_msgs
   moveit_core
@@ -30,7 +30,7 @@ ament_target_dependencies(pick_and_place_perception
   tf2_geometry_msgs
 )
 
-install(TARGETS pick_and_place_perception
+install(TARGETS object_manipulation
   DESTINATION lib/${PROJECT_NAME}
 )
 
