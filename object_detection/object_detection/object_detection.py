@@ -5,7 +5,7 @@ from rclpy.duration import Duration
 
 from sensor_msgs.msg import PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, TransformStamped
 
 import numpy as np
 import pcl
@@ -16,55 +16,68 @@ from typing import List, Tuple, Union
 from custom_msgs.msg import DetectedSurfaces, DetectedObjects
 
 
-class TrayAndCupholderPerception(Node):
+# =========================
+# Hard-coded configuration
+# =========================
+
+# Fixed cup pose (in base_link)
+# CUP_X = 0.218
+CUP_X = 0.318
+CUP_Y = 0.350
+CUP_Z = 0.035
+CUP_FRAME_PARENT = "base_link"
+CUP_FRAME_CHILD  = "cup"
+
+# Perception ROI (meters, in base_link)
+ROI_MIN_X, ROI_MAX_X = -0.65, -0.15
+ROI_MIN_Y, ROI_MAX_Y = -0.30,  0.30
+ROI_MIN_Z, ROI_MAX_Z = -0.80,  0.10
+
+# Below-tray band selection and radius cap (meters)
+BELOW_BAND    = 0.06
+Z_GAP_MIN     = 0.01
+TRAY_RADIUS_CAP = 0.14
+
+# Cup-holder physical gates (meters)
+CUP_MIN_RADIUS = 0.028
+CUP_MAX_RADIUS = 0.040
+CUP_MIN_HEIGHT = 0.020
+CUP_MAX_HEIGHT = 0.040
+
+# Clustering parameters
+CLUSTER_TOL = 0.04
+CLUSTER_MIN = 30
+CLUSTER_MAX = 100000
+
+# Occupancy check
+OCCUPANCY_Z_MARGIN  = 0.04
+OCCUPANCY_PTS_THRESH = 20
+
+# De-duplication
+MIN_CENTROID_DISTANCE = 0.05
+
+# Viz
+TRAY_MARKER_HEIGHT = 0.09
+CUP_MARKER_HEIGHT  = 0.035
+TEXT_HEIGHT_OFFSET = 0.06
+
+# Optional: also publish per-holder dynamic TFs? (kept False to avoid confusion)
+PUBLISH_HOLDER_TFS = False
+
+
+class ObjectDetection(Node):
     """
     Detects:
       • Tray (as a plane-ish circular surface) → publishes /tray_marker (green cylinders) and /tray_detected
       • Cup-holders (as cylinders)             → publishes /cup_holder_marker (blue cylinders) and /cup_holder_detected
-    Logic updated to:
-      1) segment tray plane
-      2) derive a "below-tray" band in Z + radial cap around tray centroid
-      3) cluster that band and accept clusters by physical dimensions (radius/height)
-      4) skip clusters likely occupied by cups (points above surface)
-      5) enforce min inter-centroid distance
+
+    Also:
+      • Publishes a STATIC TF 'cup' at a hard-coded pose (CUP_X/Y/Z) in 'base_link'.
+        Static TFs do not expire, unlike one-off dynamic TF messages.
     """
 
     def __init__(self) -> None:
-        super().__init__('tray_and_cupholder_detection_node')
-
-        # --- Params (tunable) ---
-        # Coarse ROI to speed up plane search (meters, base_link)
-        self.declare_parameter('roi_min_x', -0.65); self.declare_parameter('roi_max_x', -0.15)
-        self.declare_parameter('roi_min_y', -0.30); self.declare_parameter('roi_max_y',  0.30)
-        self.declare_parameter('roi_min_z', -0.80); self.declare_parameter('roi_max_z',  0.10)
-
-        # "Below-tray" band selection and radius cap (meters)
-        self.declare_parameter('below_band', 0.06)       # how far below tray centroid z we allow
-        self.declare_parameter('z_gap_min', 0.01)        # at least this much below tray z (avoid same-plane points)
-        self.declare_parameter('tray_radius_cap', 0.14)  # radial cap around tray centroid
-
-        # Cup-holder physical gates (meters)
-        self.declare_parameter('cup_min_radius', 0.028)
-        self.declare_parameter('cup_max_radius', 0.040)
-        self.declare_parameter('cup_min_height', 0.020)
-        self.declare_parameter('cup_max_height', 0.040)
-
-        # Clustering parameters
-        self.declare_parameter('cluster_tol', 0.04)
-        self.declare_parameter('cluster_min', 30)
-        self.declare_parameter('cluster_max', 100000)
-
-        # Occupancy check
-        self.declare_parameter('occupancy_z_margin', 0.04)  # look for points above holder top by this margin
-        self.declare_parameter('occupancy_pts_thresh', 20)   # enough points above → considered occupied
-
-        # De-duplication
-        self.declare_parameter('min_centroid_distance', 0.05)
-
-        # Viz tweaks
-        self.declare_parameter('tray_marker_height', 0.09)
-        self.declare_parameter('cup_marker_height',  0.035)
-        self.declare_parameter('text_height_offset', 0.06)
+        super().__init__('object_detection_node')
 
         # --- Subscription (wrist depth cloud) ---
         self.pc_sub_wrist = self.create_subscription(
@@ -78,12 +91,20 @@ class TrayAndCupholderPerception(Node):
         self.tray_detected_pub     = self.create_publisher(DetectedSurfaces, '/tray_detected', 10)
         self.cuph_detected_pub     = self.create_publisher(DetectedObjects,  '/cup_holder_detected', 10)
 
-        # --- TF ---
+        # --- TF (listener + STATIC broadcaster) ---
         self.tf_buffer = tf2_ros.Buffer()
-               # Listener must be kept alive by the node
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        # Use STATIC broadcaster for the fixed cup frame so it never disappears
+        self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
 
-    # ------------ Core callback ------------
+        # Publish the static TF for the cup once at startup
+        self.publish_static_cup_tf()
+        self.get_logger().info(
+            f"[object_detection] Published STATIC TF '{CUP_FRAME_CHILD}' in '{CUP_FRAME_PARENT}' "
+            f"at ({CUP_X:.3f}, {CUP_Y:.3f}, {CUP_Z:.3f})"
+        )
+
+    # --------- Core callback ---------
     def callback_tray_and_cupholders(self, msg: PointCloud2) -> None:
         try:
             cloud = self.from_ros_msg(msg)
@@ -93,9 +114,9 @@ class TrayAndCupholderPerception(Node):
             # 1) coarse ROI
             roi = self.filter_cloud(
                 cloud,
-                self.get_parameter('roi_min_x').value, self.get_parameter('roi_max_x').value,
-                self.get_parameter('roi_min_y').value, self.get_parameter('roi_max_y').value,
-                self.get_parameter('roi_min_z').value, self.get_parameter('roi_max_z').value
+                ROI_MIN_X, ROI_MAX_X,
+                ROI_MIN_Y, ROI_MAX_Y,
+                ROI_MIN_Z, ROI_MAX_Z
             )
             if roi is None or roi.size == 0:
                 self.get_logger().warn("Empty ROI after coarse filter.")
@@ -104,10 +125,7 @@ class TrayAndCupholderPerception(Node):
             # 2) segment tray plane from ROI, then cluster to get tray centroid/dims
             _, _, tray_plane = self.extract_plane(roi)
             tray_clusters, tray_centroids, tray_dims = self.extract_clusters(
-                tray_plane,
-                tol=self.get_parameter('cluster_tol').value,
-                min_sz=self.get_parameter('cluster_min').value,
-                max_sz=self.get_parameter('cluster_max').value
+                tray_plane, CLUSTER_TOL, CLUSTER_MIN, CLUSTER_MAX
             )
             if not tray_centroids:
                 self.get_logger().warn("No tray clusters found on plane.")
@@ -122,9 +140,9 @@ class TrayAndCupholderPerception(Node):
             band = self.filter_below_surface(
                 cloud=roi,
                 surface_centroid=tray_center,
-                z_gap_min=self.get_parameter('z_gap_min').value,
-                band_height=self.get_parameter('below_band').value,
-                radius_cap=self.get_parameter('tray_radius_cap').value
+                z_gap_min=Z_GAP_MIN,
+                band_height=BELOW_BAND,
+                radius_cap=TRAY_RADIUS_CAP
             )
             if band is None or band.size == 0:
                 self.get_logger().warn("No points in below-tray band.")
@@ -136,26 +154,21 @@ class TrayAndCupholderPerception(Node):
             ch_centroids, ch_dims = self.select_cupholder_like_clusters(
                 candidate_cloud=band,
                 reference_cloud=roi,
-                min_r=self.get_parameter('cup_min_radius').value,
-                max_r=self.get_parameter('cup_max_radius').value,
-                min_h=self.get_parameter('cup_min_height').value,
-                max_h=self.get_parameter('cup_max_height').value,
-                tol=self.get_parameter('cluster_tol').value,
-                min_sz=self.get_parameter('cluster_min').value,
-                max_sz=self.get_parameter('cluster_max').value,
-                occ_margin=self.get_parameter('occupancy_z_margin').value,
-                occ_pts=self.get_parameter('occupancy_pts_thresh').value,
-                min_dist=self.get_parameter('min_centroid_distance').value
+                min_r=CUP_MIN_RADIUS, max_r=CUP_MAX_RADIUS,
+                min_h=CUP_MIN_HEIGHT, max_h=CUP_MAX_HEIGHT,
+                tol=CLUSTER_TOL, min_sz=CLUSTER_MIN, max_sz=CLUSTER_MAX,
+                occ_margin=OCCUPANCY_Z_MARGIN, occ_pts=OCCUPANCY_PTS_THRESH,
+                min_dist=MIN_CENTROID_DISTANCE
             )
 
-            # 5) publish everything
+            # 5) publish markers + messages (no dynamic TFs by default)
             self.publish_tray([tray_center], [tray_dim_main])
             self.publish_cupholders(ch_centroids, ch_dims)
 
         except Exception as e:
-            self.get_logger().error(f"[Tray/Cupholders] Error in callback: {e}")
+            self.get_logger().error(f"[ObjectDetection] Error in callback: {e}")
 
-    # ------------ Conversions / geometry ------------
+    # --------- Conversions / geometry ---------
     def from_ros_msg(self, msg: PointCloud2) -> Union[pcl.PointCloud, None]:
         """Convert PointCloud2 to pcl.PointCloud in base_link frame."""
         try:
@@ -175,7 +188,7 @@ class TrayAndCupholderPerception(Node):
             step = msg.point_step
             n = len(msg.data) // step
             pts = np.empty((n, 3), dtype=np.float32)
-            # zero-copy-ish parsing
+            # zero-copy-ish parsing (assumes XYZ float32 at offsets 0/4/8)
             for i in range(n):
                 s = i * step
                 x = np.frombuffer(msg.data[s:s+4],       dtype=np.float32, count=1)[0]
@@ -202,7 +215,7 @@ class TrayAndCupholderPerception(Node):
             [2*x*z - 2*y*w,       2*y*z + 2*x*w,       1 - 2*x*x - 2*y*y]
         ], dtype=np.float32)
 
-    # ------------ Filtering / segmentation / clustering ------------
+    # --------- Filtering / segmentation / clustering ---------
     def filter_cloud(self, cloud: pcl.PointCloud,
                      min_x: float, max_x: float,
                      min_y: float, max_y: float,
@@ -284,13 +297,13 @@ class TrayAndCupholderPerception(Node):
         def looks_occupied(center_xyz: np.ndarray, radius: float) -> bool:
             count = 0
             cx, cy, cz = center_xyz
-            z_thresh = cz + occ_margin
+            z_thresh = cz + OCCUPANCY_Z_MARGIN
             r_thresh = radius + 0.01
             for i in range(reference_cloud.size):
                 px, py, pz = reference_cloud[i]
                 if pz > z_thresh and np.hypot(px - cx, py - cy) < r_thresh:
                     count += 1
-                    if count >= occ_pts:
+                    if count >= OCCUPANCY_PTS_THRESH:
                         return True
             return False
 
@@ -298,20 +311,20 @@ class TrayAndCupholderPerception(Node):
         accepted_d = []
         for c, d in zip(centroids, dims):
             arr_dim = np.asarray(d, dtype=float)
-            # Use planar size as diameter proxy; choose max of x/y
             diameter = float(max(arr_dim[0], arr_dim[1]))
             radius = diameter / 2.0
             height = float(arr_dim[2])
 
-            if not (min_r <= radius <= max_r and min_h <= height <= max_h):
+            if not (CUP_MIN_RADIUS <= radius <= CUP_MAX_RADIUS and
+                    CUP_MIN_HEIGHT <= height <= CUP_MAX_HEIGHT):
                 continue
 
             if looks_occupied(np.asarray(c, dtype=float), radius):
                 self.get_logger().info("Skipping cluster (occupied by cup above).")
                 continue
 
-            # de-dup by centroid spacing
-            too_close = any(np.linalg.norm(np.asarray(c) - np.asarray(k)) < min_dist for k in accepted_c)
+            too_close = any(np.linalg.norm(np.asarray(c) - np.asarray(k)) < MIN_CENTROID_DISTANCE
+                            for k in accepted_c)
             if too_close:
                 continue
 
@@ -320,11 +333,10 @@ class TrayAndCupholderPerception(Node):
 
         return accepted_c, accepted_d
 
-    # ------------ Publishing ------------
+    # --------- Publishing ---------
     def publish_tray(self, centroids: List[List[float]], dims: List[List[float]]) -> None:
-        # Markers (green cylinders)
         ma = MarkerArray()
-        h = float(self.get_parameter('tray_marker_height').value)
+        h = float(TRAY_MARKER_HEIGHT)
         for i, (c, d) in enumerate(zip(centroids, dims)):
             radius = float(d[0]) / 2.0
             m = Marker()
@@ -341,7 +353,6 @@ class TrayAndCupholderPerception(Node):
             m.color.r, m.color.g, m.color.b, m.color.a = 0.0, 1.0, 0.0, 0.4
             ma.markers.append(m)
 
-            # publish DetectedSurfaces individually (as your original)
             msg = DetectedSurfaces()
             msg.surface_id = i
             msg.position.x, msg.position.y, msg.position.z = float(c[0]), float(c[1]), float(c[2])
@@ -353,8 +364,8 @@ class TrayAndCupholderPerception(Node):
 
     def publish_cupholders(self, centroids: List[List[float]], dims: List[List[float]]) -> None:
         ma = MarkerArray()
-        h = float(self.get_parameter('cup_marker_height').value)
-        text_h = float(self.get_parameter('text_height_offset').value)
+        h = float(CUP_MARKER_HEIGHT)
+        text_h = float(TEXT_HEIGHT_OFFSET)
 
         for i, (c, d) in enumerate(zip(centroids, dims)):
             diameter = float(max(d[0], d[1]))
@@ -381,29 +392,48 @@ class TrayAndCupholderPerception(Node):
             txt.pose.position.x, txt.pose.position.y, txt.pose.position.z = float(c[0]), float(c[1]), float(c[2]) + text_h
             txt.pose.orientation.w = 1.0
             txt.scale.x = txt.scale.y = txt.scale.z = 0.05
-            # CHANGED: make numbers blue like the cylinders (same alpha as cyl)
             txt.color.r, txt.color.g, txt.color.b, txt.color.a = 0.0, 0.0, 1.0, 0.9
             ma.markers.append(txt)
 
-            # publish DetectedObjects individually (as your original)
             m = DetectedObjects()
             m.object_id = i
             m.position = Point(x=float(c[0]), y=float(c[1]), z=float(c[2]))
             m.width = diameter
             m.thickness = diameter
-            m.height = float(d[2])  # actual cluster height (or set a fixed one if you prefer)
+            m.height = float(d[2])
             self.cuph_detected_pub.publish(m)
 
-        if ma.markers:
-            self.cupholder_marker_pub.publish(ma)
-        else:
-            # publish empty to clear previous markers if needed
-            self.cupholder_marker_pub.publish(MarkerArray())
+            # (Optional) dynamic TFs per holder
+            if PUBLISH_HOLDER_TFS:
+                tfb = tf2_ros.TransformBroadcaster(self)
+                ts = TransformStamped()
+                ts.header.stamp = self.get_clock().now().to_msg()
+                ts.header.frame_id = CUP_FRAME_PARENT
+                ts.child_frame_id  = f"cup_{i}"
+                ts.transform.translation.x = float(c[0])
+                ts.transform.translation.y = float(c[1])
+                ts.transform.translation.z = float(c[2])
+                ts.transform.rotation.w = 1.0
+                tfb.sendTransform(ts)
 
-    # ------------ main ------------
+        self.cupholder_marker_pub.publish(ma)
+
+    # --------- Static TF helper ---------
+    def publish_static_cup_tf(self) -> None:
+        ts = TransformStamped()
+        ts.header.stamp = self.get_clock().now().to_msg()
+        ts.header.frame_id = CUP_FRAME_PARENT
+        ts.child_frame_id  = CUP_FRAME_CHILD
+        ts.transform.translation.x = CUP_X
+        ts.transform.translation.y = CUP_Y
+        ts.transform.translation.z = CUP_Z
+        ts.transform.rotation.w = 1.0
+        self.static_broadcaster.sendTransform(ts)
+
+# ------------ main ------------
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = TrayAndCupholderPerception()
+    node = ObjectDetection()
     rclpy.spin(node)
     rclpy.shutdown()
 
