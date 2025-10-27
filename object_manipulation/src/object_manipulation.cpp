@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <map> // kept (ok to have)
 #include <memory>
 #include <thread>
 #include <vector>
@@ -193,10 +194,11 @@ public:
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     // 3) Move above the cup with the TOOL POINTING DOWN (roll = pi)
-    const double pregrasp_offset_z = 0.30; // 10cm above the cup
+    const double pregrasp_offset_z = 0.30; // 30cm above the cup pose
     tf2::Quaternion q_down;
     q_down.setRPY(M_PI, 0.0, 0.0); // roll=π → tool Z points down
-    RCLCPP_INFO(LOGGER, "Moving above cup (30cm) with Z-down orientation...");
+    RCLCPP_INFO(LOGGER,
+                "Moving above cup pose (30cm) with Z-down orientation...");
     setup_goal_pose_target(cup_pose.position.x, cup_pose.position.y,
                            cup_pose.position.z + pregrasp_offset_z, q_down.x(),
                            q_down.y(), q_down.z(), q_down.w());
@@ -204,9 +206,9 @@ public:
     execute_trajectory_kinematics();
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    // 4) Approach straight down 10cm (Cartesian)
-    RCLCPP_INFO(LOGGER, "Approaching (Cartesian down 15cm)...");
-    setup_waypoints_target(+0.000, +0.000, -0.15);
+    // 4) Approach straight down 12cm (Cartesian)
+    RCLCPP_INFO(LOGGER, "Approaching (Cartesian down 12cm)...");
+    setup_waypoints_target(+0.000, +0.000, -0.12);
     plan_trajectory_cartesian();
     execute_trajectory_cartesian();
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -218,21 +220,67 @@ public:
     execute_trajectory_gripper();
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    // 6) Retreat straight up 10cm (Cartesian)
-    RCLCPP_INFO(LOGGER, "Retreating (Cartesian up 10cm)...");
-    setup_waypoints_target(+0.000, +0.000, +0.10);
+    // 6) Retreat straight up 12cm (Cartesian)
+    RCLCPP_INFO(LOGGER, "Retreating (Cartesian up 12cm)...");
+    setup_waypoints_target(+0.000, +0.000, +0.12);
     plan_trajectory_cartesian();
     execute_trajectory_cartesian();
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    // (Optional) continue to place, open, and return home as before
-    RCLCPP_INFO(LOGGER, "Returning to named pose: home ...");
-    move_group_robot_->setNamedTarget("home");
-    plan_trajectory_kinematics();
-    execute_trajectory_kinematics();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    // 7) Turn left: rotate shoulder_pan_joint by +90° (≈ +1.5708 rad)
+    RCLCPP_INFO(LOGGER, "Rotating shoulder_pan_joint by +90 degrees (left)...");
+    {
+      // Use full joint vector to avoid planner drifting to a named pose.
+      move_group_robot_
+          ->clearPoseTargets(); // important: no leftover pose goals
+      move_group_robot_
+          ->setStartStateToCurrentState(); // start from exactly here
 
-    RCLCPP_INFO(LOGGER, "Object Manipulation Trajectory Execution Complete");
+      auto state = move_group_robot_->getCurrentState(1.0);
+      if (!state || !joint_model_group_robot_) {
+        RCLCPP_ERROR(LOGGER, "[JOINT] Missing state or group.");
+      } else {
+        std::vector<double> joints;
+        state->copyJointGroupPositions(joint_model_group_robot_, joints);
+
+        // Find index of shoulder_pan_joint within the group order
+        const std::vector<std::string> &names =
+            joint_model_group_robot_->getVariableNames();
+        int pan_idx = -1;
+        for (size_t i = 0; i < names.size(); ++i) {
+          if (names[i] == "shoulder_pan_joint") {
+            pan_idx = static_cast<int>(i);
+            break;
+          }
+        }
+        if (pan_idx < 0 || pan_idx >= static_cast<int>(joints.size())) {
+          RCLCPP_ERROR(LOGGER,
+                       "[JOINT] shoulder_pan_joint not found in group.");
+        } else {
+          joints[pan_idx] += M_PI / 2.0;
+
+          // Enforce bounds to avoid invalid targets
+          moveit::core::RobotState tmp = *state;
+          tmp.setJointGroupPositions(joint_model_group_robot_, joints);
+          const moveit::core::JointModelGroup *jmg = joint_model_group_robot_;
+          if (!tmp.satisfiesBounds(jmg)) {
+            tmp.enforceBounds(jmg);
+            tmp.copyJointGroupPositions(jmg, joints);
+            RCLCPP_WARN(LOGGER, "[JOINT] Target clipped to joint limits.");
+          }
+
+          // Send the full joint vector as target (prevents drifting to home).
+          move_group_robot_->setJointValueTarget(joints);
+          plan_trajectory_kinematics();
+          execute_trajectory_kinematics();
+          std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+      }
+    }
+
+    // Done — no return-to-home here
+    RCLCPP_INFO(LOGGER,
+                "Object Manipulation: finished rotation left with cup.");
   }
 
 private:
