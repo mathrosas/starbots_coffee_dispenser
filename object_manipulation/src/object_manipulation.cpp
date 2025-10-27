@@ -10,16 +10,20 @@
 #include <thread>
 #include <vector>
 
+// NEW: for easy RPY->quaternion
+#include <tf2/LinearMath/Quaternion.h>
+
 // program variables
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("move_group_node");
 static const std::string PLANNING_GROUP_ROBOT = "ur_manipulator";
 static const std::string PLANNING_GROUP_GRIPPER = "gripper";
 
-class PickAndPlaceTrajectory {
+class ObjectManipulation {
 public:
-  PickAndPlaceTrajectory(rclcpp::Node::SharedPtr base_node_)
+  ObjectManipulation(rclcpp::Node::SharedPtr base_node_)
       : base_node_(base_node_) {
-    RCLCPP_INFO(LOGGER, "Initializing Class: Pick And Place Trajectory...");
+    RCLCPP_INFO(LOGGER,
+                "Initializing Class: Object Manipulation Trajectory...");
 
     // configure node options
     rclcpp::NodeOptions node_options;
@@ -157,87 +161,78 @@ public:
     move_group_gripper_->setStartStateToCurrentState();
 
     // indicate initialization
-    RCLCPP_INFO(LOGGER, "Class Initialized: Pick And Place Trajectory");
+    RCLCPP_INFO(LOGGER, "Class Initialized: Object Manipulation Trajectory");
   }
 
-  ~PickAndPlaceTrajectory() {
-    RCLCPP_INFO(LOGGER, "Class Terminated: Pick And Place Trajectory");
+  ~ObjectManipulation() {
+    RCLCPP_INFO(LOGGER, "Class Terminated: Object Manipulation Trajectory");
   }
 
   void execute_trajectory_plan() {
-    RCLCPP_INFO(LOGGER, "Planning and Executing Pick And Place Trajectory...");
+    RCLCPP_INFO(LOGGER,
+                "Planning and Executing Object Manipulation Trajectory...");
 
-    RCLCPP_INFO(LOGGER, "Going to Home Position...");
-    RCLCPP_INFO(LOGGER, "Preparing Joint Value Trajectory...");
-    setup_joint_value_target(+0.0000, -2.5000, +1.5000, -1.5000, -1.5000,
-                             +0.0000);
-    RCLCPP_INFO(LOGGER, "Planning Joint Value Trajectory...");
+    // --- Fixed cup pose (world frame) ---
+    Pose cup_pose;
+    cup_pose.position.x = 0.298;
+    cup_pose.position.y = 0.330;
+    cup_pose.position.z = 0.035;
+
+    // 1) Go to named "home" (no raw joint coordinates)
+    RCLCPP_INFO(LOGGER, "Going to named pose: home ...");
+    move_group_robot_->setNamedTarget("home");
     plan_trajectory_kinematics();
-    RCLCPP_INFO(LOGGER, "Executing Joint Value Trajectory...");
     execute_trajectory_kinematics();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    RCLCPP_INFO(LOGGER, "Going to Pregrasp Position...");
-    RCLCPP_INFO(LOGGER, "Preparing Joint Value Trajectory...");
-    setup_joint_value_target(-2.807505, -1.695629, -1.787547, -1.229292,
-                             +1.570285, -1.236503);
-    RCLCPP_INFO(LOGGER, "Planning Joint Value Trajectory...");
-    plan_trajectory_kinematics();
-    RCLCPP_INFO(LOGGER, "Executing Joint Value Trajectory...");
-    execute_trajectory_kinematics();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-
-    RCLCPP_INFO(LOGGER, "Opening Gripper...");
+    // 2) Ensure gripper is "open" as the very first gripper action
+    RCLCPP_INFO(LOGGER, "Opening Gripper (named pose: open)...");
     setup_named_pose_gripper("open");
     plan_trajectory_gripper();
     execute_trajectory_gripper();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    RCLCPP_INFO(LOGGER, "Approaching...");
-    setup_waypoints_target(+0.000, +0.000, -0.060);
+    // 3) Move above the cup with the TOOL POINTING DOWN (roll = pi)
+    const double pregrasp_offset_z = 0.30; // 10cm above the cup
+    tf2::Quaternion q_down;
+    q_down.setRPY(M_PI, 0.0, 0.0); // roll=π → tool Z points down
+    RCLCPP_INFO(LOGGER, "Moving above cup (30cm) with Z-down orientation...");
+    setup_goal_pose_target(cup_pose.position.x, cup_pose.position.y,
+                           cup_pose.position.z + pregrasp_offset_z, q_down.x(),
+                           q_down.y(), q_down.z(), q_down.w());
+    plan_trajectory_kinematics();
+    execute_trajectory_kinematics();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // 4) Approach straight down 10cm (Cartesian)
+    RCLCPP_INFO(LOGGER, "Approaching (Cartesian down 15cm)...");
+    setup_waypoints_target(+0.000, +0.000, -0.15);
     plan_trajectory_cartesian();
     execute_trajectory_cartesian();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+    // 5) Close the gripper to grasp
     RCLCPP_INFO(LOGGER, "Closing Gripper...");
     setup_named_pose_gripper("close");
     plan_trajectory_gripper();
     execute_trajectory_gripper();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    RCLCPP_INFO(LOGGER, "Retreating...");
-    setup_waypoints_target(+0.000, +0.000, +0.060);
+    // 6) Retreat straight up 10cm (Cartesian)
+    RCLCPP_INFO(LOGGER, "Retreating (Cartesian up 10cm)...");
+    setup_waypoints_target(+0.000, +0.000, +0.10);
     plan_trajectory_cartesian();
     execute_trajectory_cartesian();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    RCLCPP_INFO(LOGGER, "Going to Place Position...");
-    setup_goal_pose_target(-0.342, -0.020, +0.230, -1.000, +0.000, +0.000,
-                           +0.000);
-
-    RCLCPP_INFO(LOGGER, "Preparing Joint Value Trajectory...");
-    setup_joint_value_target(+0.000000, -1.695629, -1.787547, -1.229292,
-                             +1.570285, -1.236503);
-    RCLCPP_INFO(LOGGER, "Planning Joint Value Trajectory...");
-    plan_trajectory_kinematics();
-    RCLCPP_INFO(LOGGER, "Executing Joint Value Trajectory...");
-    execute_trajectory_kinematics();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-
-    RCLCPP_INFO(LOGGER, "Opening Gripper...");
-    setup_named_pose_gripper("open");
-    plan_trajectory_gripper();
-    execute_trajectory_gripper();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-
-    RCLCPP_INFO(LOGGER, "Going to Home Position...");
-    setup_joint_value_target(+0.0000, -2.5000, +1.5000, -1.5000, -1.5000,
-                             +0.0000);
+    // (Optional) continue to place, open, and return home as before
+    RCLCPP_INFO(LOGGER, "Returning to named pose: home ...");
+    move_group_robot_->setNamedTarget("home");
     plan_trajectory_kinematics();
     execute_trajectory_kinematics();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    RCLCPP_INFO(LOGGER, "Pick And Place Trajectory Execution Complete");
+    RCLCPP_INFO(LOGGER, "Object Manipulation Trajectory Execution Complete");
   }
 
 private:
@@ -378,8 +373,9 @@ private:
                   "[setup_joint_value_gripper] index 2 out of range "
                   "(size=%zu). Using last index.",
                   joint_group_positions_gripper_.size());
-      idx = joint_group_positions_gripper_.size() - 1;
     }
+    if (idx >= joint_group_positions_gripper_.size())
+      idx = joint_group_positions_gripper_.size() - 1;
     joint_group_positions_gripper_[idx] = angle;
     move_group_gripper_->setJointValueTarget(joint_group_positions_gripper_);
   }
@@ -407,15 +403,14 @@ private:
       RCLCPP_INFO(LOGGER, "Gripper Action Command Failed !");
     }
   }
-}; // class PickAndPlaceTrajectory
+}; // class ObjectManipulation
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
 
-  auto base_node = std::make_shared<rclcpp::Node>("pick_and_place");
-  // Do NOT declare use_sim_time here; constructor handles it safely.
+  auto base_node = std::make_shared<rclcpp::Node>("object_manipulation");
 
-  PickAndPlaceTrajectory app(base_node);
+  ObjectManipulation app(base_node);
   app.execute_trajectory_plan();
 
   rclcpp::shutdown();
