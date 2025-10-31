@@ -34,8 +34,8 @@ ROI_MIN_Y, ROI_MAX_Y = -0.30,  0.30
 ROI_MIN_Z, ROI_MAX_Z = -0.80,  0.10
 
 # Below-tray band selection and radius cap (meters)
-BELOW_BAND    = 0.06
-Z_GAP_MIN     = 0.01
+BELOW_BAND      = 0.06
+Z_GAP_MIN       = 0.01
 TRAY_RADIUS_CAP = 0.14
 
 # Cup-holder physical gates (meters)
@@ -50,7 +50,7 @@ CLUSTER_MIN = 30
 CLUSTER_MAX = 100000
 
 # Occupancy check
-OCCUPANCY_Z_MARGIN  = 0.04
+OCCUPANCY_Z_MARGIN   = 0.04
 OCCUPANCY_PTS_THRESH = 20
 
 # De-duplication
@@ -61,8 +61,10 @@ TRAY_MARKER_HEIGHT = 0.09
 CUP_MARKER_HEIGHT  = 0.035
 TEXT_HEIGHT_OFFSET = 0.06
 
-# Optional: also publish per-holder dynamic TFs? (kept False to avoid confusion)
-PUBLISH_HOLDER_TFS = False
+# Publish per-holder STATIC TFs
+PUBLISH_HOLDER_TFS = True
+# Use 'ch_' and 1-based numbering for names/frames (ch_1, ch_2, ...)
+CUP_HOLDER_FRAME_PREFIX = "ch_"
 
 
 class ObjectDetection(Node):
@@ -73,7 +75,7 @@ class ObjectDetection(Node):
 
     Also:
       • Publishes a STATIC TF 'cup' at a hard-coded pose (CUP_X/Y/Z) in 'base_link'.
-        Static TFs do not expire, unlike one-off dynamic TF messages.
+      • Publishes STATIC TFs 'ch_<n>' (1-based) for each detected holder, parented to 'base_link'.
     """
 
     def __init__(self) -> None:
@@ -91,11 +93,14 @@ class ObjectDetection(Node):
         self.tray_detected_pub     = self.create_publisher(DetectedSurfaces, '/tray_detected', 10)
         self.cuph_detected_pub     = self.create_publisher(DetectedObjects,  '/cup_holder_detected', 10)
 
-        # --- TF (listener + STATIC broadcaster) ---
+        # --- TF (listener + STATIC broadcasters) ---
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        # Use STATIC broadcaster for the fixed cup frame so it never disappears
+
+        # Static TF for fixed 'cup'
         self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+        # Static TFs for cup holders (latched, updated each callback)
+        self.holder_static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
 
         # Publish the static TF for the cup once at startup
         self.publish_static_cup_tf()
@@ -161,7 +166,7 @@ class ObjectDetection(Node):
                 min_dist=MIN_CENTROID_DISTANCE
             )
 
-            # 5) publish markers + messages (no dynamic TFs by default)
+            # 5) publish markers + messages
             self.publish_tray([tray_center], [tray_dim_main])
             self.publish_cupholders(ch_centroids, ch_dims)
 
@@ -370,7 +375,9 @@ class ObjectDetection(Node):
         for i, (c, d) in enumerate(zip(centroids, dims)):
             diameter = float(max(d[0], d[1]))
             radius = diameter / 2.0
+            one_based = i + 1  # ch_1, ch_2, ...
 
+            # Cylinder (blue)
             cyl = Marker()
             cyl.header.frame_id = "base_link"
             cyl.id = i
@@ -383,42 +390,40 @@ class ObjectDetection(Node):
             cyl.color.r, cyl.color.g, cyl.color.b, cyl.color.a = 0.0, 0.0, 1.0, 0.9
             ma.markers.append(cyl)
 
+            # Text label (BLUE)
             txt = Marker()
             txt.header.frame_id = "base_link"
             txt.id = i + 1000
             txt.type = Marker.TEXT_VIEW_FACING
             txt.action = Marker.ADD
-            txt.text = str(i)
-            txt.pose.position.x, txt.pose.position.y, txt.pose.position.z = float(c[0]), float(c[1]), float(c[2]) + text_h
+            txt.text = f"ch_{one_based}"  # show ch_1, ch_2, ...
+            txt.pose.position.x = float(c[0])
+            txt.pose.position.y = float(c[1])
+            txt.pose.position.z = float(c[2]) + text_h
             txt.pose.orientation.w = 1.0
             txt.scale.x = txt.scale.y = txt.scale.z = 0.05
-            txt.color.r, txt.color.g, txt.color.b, txt.color.a = 0.0, 0.0, 1.0, 0.9
+            txt.color.r = 0.0
+            txt.color.g = 0.0
+            txt.color.b = 1.0  # Blue
+            txt.color.a = 0.95
             ma.markers.append(txt)
 
+            # Topic message (IDs 1-based to match names)
             m = DetectedObjects()
-            m.object_id = i
+            m.object_id = one_based
             m.position = Point(x=float(c[0]), y=float(c[1]), z=float(c[2]))
             m.width = diameter
             m.thickness = diameter
             m.height = float(d[2])
             self.cuph_detected_pub.publish(m)
 
-            # (Optional) dynamic TFs per holder
-            if PUBLISH_HOLDER_TFS:
-                tfb = tf2_ros.TransformBroadcaster(self)
-                ts = TransformStamped()
-                ts.header.stamp = self.get_clock().now().to_msg()
-                ts.header.frame_id = CUP_FRAME_PARENT
-                ts.child_frame_id  = f"cup_{i}"
-                ts.transform.translation.x = float(c[0])
-                ts.transform.translation.y = float(c[1])
-                ts.transform.translation.z = float(c[2])
-                ts.transform.rotation.w = 1.0
-                tfb.sendTransform(ts)
-
         self.cupholder_marker_pub.publish(ma)
 
-    # --------- Static TF helper ---------
+        # Publish STATIC TFs per holder (latched). Re-sending updates the latched pose.
+        if PUBLISH_HOLDER_TFS:
+            self.publish_static_cupholder_tfs(centroids)
+
+    # --------- Static TF helpers ---------
     def publish_static_cup_tf(self) -> None:
         ts = TransformStamped()
         ts.header.stamp = self.get_clock().now().to_msg()
@@ -429,6 +434,33 @@ class ObjectDetection(Node):
         ts.transform.translation.z = CUP_Z
         ts.transform.rotation.w = 1.0
         self.static_broadcaster.sendTransform(ts)
+
+    def publish_static_cupholder_tfs(self, centroids: List[List[float]]) -> None:
+        """
+        Publish one STATIC TF per detected cup-holder:
+            parent: base_link
+            child : ch_<n>  (1-based)
+        Re-publishing with the same child updates the latched transform.
+        """
+        if not centroids:
+            return
+
+        now = self.get_clock().now().to_msg()
+        tfs: List[TransformStamped] = []
+        for i, c in enumerate(centroids):
+            one_based = i + 1
+            ts = TransformStamped()
+            ts.header.stamp = now
+            ts.header.frame_id = CUP_FRAME_PARENT  # base_link
+            ts.child_frame_id  = f"{CUP_HOLDER_FRAME_PREFIX}{one_based}"  # ch_1, ch_2, ...
+            ts.transform.translation.x = float(c[0])
+            ts.transform.translation.y = float(c[1])
+            ts.transform.translation.z = float(c[2])
+            ts.transform.rotation.w = 1.0  # identity orientation; adjust if needed
+            tfs.append(ts)
+
+        self.holder_static_broadcaster.sendTransform(tfs)
+        self.get_logger().info(f"Published {len(tfs)} STATIC TFs for cup-holders (ch_#).")
 
 # ------------ main ------------
 def main(args=None) -> None:
