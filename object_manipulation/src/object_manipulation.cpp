@@ -6,12 +6,11 @@
 
 #include <chrono>
 #include <cmath>
-#include <map> // kept (ok to have)
+#include <map>
 #include <memory>
 #include <thread>
 #include <vector>
 
-// NEW: for easy RPY->quaternion
 #include <tf2/LinearMath/Quaternion.h>
 
 // program variables
@@ -184,14 +183,14 @@ public:
     move_group_robot_->setNamedTarget("home");
     plan_trajectory_kinematics();
     execute_trajectory_kinematics();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     // 2) Ensure gripper is "open" as the very first gripper action
     RCLCPP_INFO(LOGGER, "Opening Gripper (named pose: open)...");
     setup_named_pose_gripper("open");
     plan_trajectory_gripper();
     execute_trajectory_gripper();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     // 3) Move above the cup with the TOOL POINTING DOWN (roll = pi)
     const double pregrasp_offset_z = 0.30; // 30cm above the cup pose
@@ -200,83 +199,39 @@ public:
     RCLCPP_INFO(LOGGER,
                 "Moving above cup pose (30cm) with Z-down orientation...");
     setup_goal_pose_target(cup_pose.position.x, cup_pose.position.y,
-                           cup_pose.position.z + pregrasp_offset_z, q_down.x(),
-                           q_down.y(), q_down.z(), q_down.w());
+                           cup_pose.position.z + pregrasp_offset_z);
     plan_trajectory_kinematics();
     execute_trajectory_kinematics();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     // 4) Approach straight down 12cm (Cartesian)
     RCLCPP_INFO(LOGGER, "Approaching (Cartesian down 12cm)...");
     setup_waypoints_target(+0.000, +0.000, -0.12);
     plan_trajectory_cartesian();
     execute_trajectory_cartesian();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     // 5) Close the gripper to grasp
     RCLCPP_INFO(LOGGER, "Closing Gripper...");
     setup_named_pose_gripper("close");
     plan_trajectory_gripper();
     execute_trajectory_gripper();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     // 6) Retreat straight up 12cm (Cartesian)
     RCLCPP_INFO(LOGGER, "Retreating (Cartesian up 12cm)...");
     setup_waypoints_target(+0.000, +0.000, +0.12);
     plan_trajectory_cartesian();
     execute_trajectory_cartesian();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-    // 7) Turn left: rotate shoulder_pan_joint by +90° (≈ +1.5708 rad)
-    RCLCPP_INFO(LOGGER, "Rotating shoulder_pan_joint by +90 degrees (left)...");
-    {
-      // Use full joint vector to avoid planner drifting to a named pose.
-      move_group_robot_
-          ->clearPoseTargets(); // important: no leftover pose goals
-      move_group_robot_
-          ->setStartStateToCurrentState(); // start from exactly here
-
-      auto state = move_group_robot_->getCurrentState(1.0);
-      if (!state || !joint_model_group_robot_) {
-        RCLCPP_ERROR(LOGGER, "[JOINT] Missing state or group.");
-      } else {
-        std::vector<double> joints;
-        state->copyJointGroupPositions(joint_model_group_robot_, joints);
-
-        // Find index of shoulder_pan_joint within the group order
-        const std::vector<std::string> &names =
-            joint_model_group_robot_->getVariableNames();
-        int pan_idx = -1;
-        for (size_t i = 0; i < names.size(); ++i) {
-          if (names[i] == "shoulder_pan_joint") {
-            pan_idx = static_cast<int>(i);
-            break;
-          }
-        }
-        if (pan_idx < 0 || pan_idx >= static_cast<int>(joints.size())) {
-          RCLCPP_ERROR(LOGGER,
-                       "[JOINT] shoulder_pan_joint not found in group.");
-        } else {
-          joints[pan_idx] += M_PI / 2.0;
-
-          // Enforce bounds to avoid invalid targets
-          moveit::core::RobotState tmp = *state;
-          tmp.setJointGroupPositions(joint_model_group_robot_, joints);
-          const moveit::core::JointModelGroup *jmg = joint_model_group_robot_;
-          if (!tmp.satisfiesBounds(jmg)) {
-            tmp.enforceBounds(jmg);
-            tmp.copyJointGroupPositions(jmg, joints);
-            RCLCPP_WARN(LOGGER, "[JOINT] Target clipped to joint limits.");
-          }
-
-          // Send the full joint vector as target (prevents drifting to home).
-          move_group_robot_->setJointValueTarget(joints);
-          plan_trajectory_kinematics();
-          execute_trajectory_kinematics();
-          std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-      }
-    }
+    // 7) Go to the exact cup pose with gripper looking down
+    RCLCPP_INFO(LOGGER, "Moving to final cup pose (x=-0.337211, y=-0.00417373, "
+                        "z=-0.586098) with Z-down orientation...");
+    setup_goal_pose_target(-0.337211, 0, 0);
+    plan_trajectory_kinematics();
+    execute_trajectory_kinematics();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     // Done — no return-to-home here
     RCLCPP_INFO(LOGGER,
@@ -337,15 +292,14 @@ private:
     move_group_robot_->setJointValueTarget(joint_group_positions_robot_);
   }
 
-  void setup_goal_pose_target(float x, float y, float z, float qx, float qy,
-                              float qz, float qw) {
+  void setup_goal_pose_target(float x, float y, float z) {
     target_pose_robot_.position.x = x;
     target_pose_robot_.position.y = y;
     target_pose_robot_.position.z = z;
-    target_pose_robot_.orientation.x = qx;
-    target_pose_robot_.orientation.y = qy;
-    target_pose_robot_.orientation.z = qz;
-    target_pose_robot_.orientation.w = qw;
+    target_pose_robot_.orientation.x = -1;
+    target_pose_robot_.orientation.y = 0;
+    target_pose_robot_.orientation.z = 0;
+    target_pose_robot_.orientation.w = 0;
     move_group_robot_->clearPoseTargets();
     move_group_robot_->setPoseTarget(target_pose_robot_);
   }
