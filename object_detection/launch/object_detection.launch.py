@@ -18,7 +18,8 @@ def generate_launch_description():
         package='object_detection',
         executable='object_detection',
         name='object_detection',
-        output='screen'
+        output='screen',
+        arguments=["--ros-args", "--log-level", "info"]
     )
 
     rviz = Node(
