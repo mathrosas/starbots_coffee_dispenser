@@ -7,6 +7,8 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <chrono>
+#include <cmath>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -109,9 +111,12 @@ public:
 
     // Some planning settings (like your perception-style script)
     arm_->setPlanningTime(5.0);
-    arm_->setNumPlanningAttempts(10);
-    arm_->setGoalPositionTolerance(0.005);
-    arm_->setGoalOrientationTolerance(0.05);
+    // arm_->setNumPlanningAttempts(10);
+    // arm_->setGoalPositionTolerance(0.005);
+    // arm_->setGoalOrientationTolerance(0.05);
+    arm_->setNumPlanningAttempts(20);
+    arm_->setGoalPositionTolerance(0.1);
+    arm_->setGoalOrientationTolerance(0.1);
     arm_->setMaxVelocityScalingFactor(0.3);
     arm_->setMaxAccelerationScalingFactor(0.3);
 
@@ -142,16 +147,16 @@ public:
     arm_->setNamedTarget("home");
     planAndExecArm("Step1_GoHome");
     arm_->setStartStateToCurrentState();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // 2) Ensure gripper is "open" as the very first gripper action
     RCLCPP_INFO(LOGGER, "Opening Gripper (named pose: open)...");
     setGripperNamed("open");
     planAndExecGripper();
     gripper_->setStartStateToCurrentState();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
-    // 3) Move above the cup with the TOOL POINTING DOWN (roll = pi)
+    // 3) Move above the cup (Z-down orientation encoded in quaternion below)
     const double pregrasp_offset_z = 0.30; // 30cm above the cup pose
     RCLCPP_INFO(LOGGER,
                 "Moving above cup pose (30cm) with Z-down orientation...");
@@ -159,36 +164,49 @@ public:
                       cup_pose.position.z + pregrasp_offset_z);
     planAndExecArm("Step3_PreGraspAboveCup");
     arm_->setStartStateToCurrentState();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // 4) Approach straight down 12cm (Cartesian)
     RCLCPP_INFO(LOGGER, "Approaching (Cartesian down 12cm)...");
     cartesianDelta(+0.000, +0.000, -0.12, "Step4_ApproachDown");
     arm_->setStartStateToCurrentState();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // 5) Close the gripper to grasp
     RCLCPP_INFO(LOGGER, "Closing Gripper...");
     setGripperNamed("close");
     planAndExecGripper();
     gripper_->setStartStateToCurrentState();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // 6) Retreat straight up 30cm (Cartesian)
-    RCLCPP_INFO(LOGGER, "Retreating (Cartesian up 12cm)...");
+    RCLCPP_INFO(LOGGER, "Retreating (Cartesian up 30cm)...");
     cartesianDelta(+0.000, +0.000, +0.30, "Step6_RetreatUp");
     arm_->setStartStateToCurrentState();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
-    // 7) Go to the final pose with gripper looking down
-    RCLCPP_INFO(LOGGER, "Moving to final cup pose (x=-0.337211, y=-0.00417373, "
-                        "z=-0.586098) with Z-down orientation...");
-    // NOTE: this follows your original call; adjust y/z if you want exact
-    // cupholder pose
-    setGoalPoseTarget(-0.337211, 0.0, 0.3);
-    planAndExecArm("Step7_GoToFinalPose");
+    // 7) Rotate shoulder_pan_joint by +90°
+    RCLCPP_INFO(LOGGER, "Rotating shoulder_pan_joint by +90 degrees...");
+    rotateShoulderPan(+M_PI_2, "Step7_RotateShoulderPan_+90deg");
+    // settle + resync to avoid "start deviates" on the next step
+    std::this_thread::sleep_for(std::chrono::seconds(3));
     arm_->setStartStateToCurrentState();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+    // 8) NEW: Move to the requested pose (Z-down orientation preserved)
+    RCLCPP_INFO(LOGGER, "Moving to requested pose (x=-0.337211, y=-0.00417373, "
+                        "z=-0.286098)...");
+    setGoalPoseTarget(-0.337211f, -0.00417373f, -0.286098f);
+    planAndExecArm("Step8_GoToRequestedPose");
+    arm_->setStartStateToCurrentState();
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    // 9) (original) Go to the previous final pose (optional; keep or remove)
+    RCLCPP_INFO(LOGGER,
+                "Moving to final cup pose (x=-0.337211, y=0.0, z=0.3)...");
+    setGoalPoseTarget(-0.337211, 0.0, 0.3);
+    planAndExecArm("Step9_GoToFinalPose");
+    arm_->setStartStateToCurrentState();
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     RCLCPP_INFO(LOGGER, "Object Manipulation: finished sequence of steps.");
   }
@@ -212,7 +230,7 @@ private:
     target.position.x = x;
     target.position.y = y;
     target.position.z = z;
-    // same orientation as your original setup_goal_pose_target:
+    // Z-down orientation encoded as a quaternion (-1,0,0,0) (180° about X)
     target.orientation.x = -1.0;
     target.orientation.y = 0.0;
     target.orientation.z = 0.0;
@@ -267,6 +285,62 @@ private:
 
     RCLCPP_INFO(LOGGER, "[%s] cartesian execute success (fraction=%.2f)", tag,
                 fraction);
+  }
+
+  // Rotate shoulder_pan_joint by a relative angle (radians)
+  void rotateShoulderPan(double delta_rad, const char *tag) {
+    auto state = arm_->getCurrentState(1.0); // wait up to 1s
+    if (!state) {
+      RCLCPP_ERROR(LOGGER, "[%s] could not get current state", tag);
+      return;
+    }
+
+    const moveit::core::JointModelGroup *jmg =
+        state->getJointModelGroup(PLANNING_GROUP_ROBOT);
+    if (!jmg) {
+      RCLCPP_ERROR(LOGGER, "[%s] no JointModelGroup for %s", tag,
+                   PLANNING_GROUP_ROBOT.c_str());
+      return;
+    }
+
+    std::vector<double> joints;
+    state->copyJointGroupPositions(jmg, joints);
+    const auto &names = jmg->getVariableNames();
+
+    // find shoulder_pan_joint index
+    int idx = -1;
+    for (size_t i = 0; i < names.size(); ++i) {
+      if (names[i] == "shoulder_pan_joint") {
+        idx = static_cast<int>(i);
+        break;
+      }
+    }
+    if (idx < 0 || static_cast<size_t>(idx) >= joints.size()) {
+      RCLCPP_ERROR(LOGGER, "[%s] shoulder_pan_joint not found in group", tag);
+      return;
+    }
+
+    // add delta and normalize to [-pi, pi]
+    joints[idx] += delta_rad;
+    while (joints[idx] > M_PI)
+      joints[idx] -= 2.0 * M_PI;
+    while (joints[idx] < -M_PI)
+      joints[idx] += 2.0 * M_PI;
+
+    arm_->setJointValueTarget(joints);
+
+    Plan plan;
+    auto ok = (arm_->plan(plan) == moveit::core::MoveItErrorCode::SUCCESS);
+    if (!ok) {
+      RCLCPP_WARN(LOGGER, "[%s] plan failed", tag);
+      return;
+    }
+    auto code = arm_->execute(plan);
+    if (code != moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_ERROR(LOGGER, "[%s] execute failed (code=%d)", tag, code.val);
+      return;
+    }
+    RCLCPP_INFO(LOGGER, "[%s] execute success", tag);
   }
 
   // ===== Helpers for gripper =====
