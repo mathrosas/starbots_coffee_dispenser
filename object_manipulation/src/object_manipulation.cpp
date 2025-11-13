@@ -111,12 +111,9 @@ public:
 
     // Some planning settings (like your perception-style script)
     arm_->setPlanningTime(5.0);
-    // arm_->setNumPlanningAttempts(10);
-    // arm_->setGoalPositionTolerance(0.005);
-    // arm_->setGoalOrientationTolerance(0.05);
     arm_->setNumPlanningAttempts(20);
-    arm_->setGoalPositionTolerance(0.1);
-    arm_->setGoalOrientationTolerance(0.1);
+    arm_->setGoalPositionTolerance(0.005);
+    arm_->setGoalOrientationTolerance(0.05);
     arm_->setMaxVelocityScalingFactor(0.3);
     arm_->setMaxAccelerationScalingFactor(0.3);
 
@@ -187,7 +184,7 @@ public:
 
     // 7) Rotate shoulder_pan_joint by +90°
     RCLCPP_INFO(LOGGER, "Rotating shoulder_pan_joint by +90 degrees...");
-    rotateShoulderPan(+M_PI_2, "Step7_RotateShoulderPan_+90deg");
+    rotateShoulderPan(2.0 * M_PI / 3.0, "Step7_RotateShoulderPan_+120deg");
     // settle + resync to avoid "start deviates" on the next step
     std::this_thread::sleep_for(std::chrono::seconds(3));
     arm_->setStartStateToCurrentState();
@@ -195,16 +192,40 @@ public:
     // 8) NEW: Move to the requested pose (Z-down orientation preserved)
     RCLCPP_INFO(LOGGER, "Moving to requested pose (x=-0.337211, y=-0.00417373, "
                         "z=-0.286098)...");
-    setGoalPoseTarget(-0.337211f, -0.00417373f, -0.286098f);
+    // setGoalPoseTarget(-0.3375, -0.0045, -0.2861);
+    setGoalPoseTarget(-0.34, -0.0045, -0.1861);
     planAndExecArm("Step8_GoToRequestedPose");
     arm_->setStartStateToCurrentState();
     std::this_thread::sleep_for(std::chrono::seconds(3));
 
-    // 9) (original) Go to the previous final pose (optional; keep or remove)
+    // 9) NEW: Lower the arm
+    RCLCPP_INFO(LOGGER, "Moving to requested pose (x=-0.337211, y=-0.00417373, "
+                        "z=-0.286098)...");
+    // setGoalPoseTarget(-0.3375, -0.0045, -0.5861);
+    setGoalPoseTarget(-0.34, -0.0045, -0.5861);
+    planAndExecArm("Step9_GoToFinalRequestedPose");
+    arm_->setStartStateToCurrentState();
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    // 10) Open the gripper to dispense the cup
+    RCLCPP_INFO(LOGGER, "Opening Gripper...");
+    setGripperNamed("open");
+    planAndExecGripper();
+    gripper_->setStartStateToCurrentState();
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    // 11) (original) Go to the previous final pose (optional; keep or remove)
     RCLCPP_INFO(LOGGER,
                 "Moving to final cup pose (x=-0.337211, y=0.0, z=0.3)...");
     setGoalPoseTarget(-0.337211, 0.0, 0.3);
-    planAndExecArm("Step9_GoToFinalPose");
+    planAndExecArm("Step11_GoToFinalPose");
+    arm_->setStartStateToCurrentState();
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    // 12) Go to named "home"
+    RCLCPP_INFO(LOGGER, "Going to named pose: home ...");
+    arm_->setNamedTarget("home");
+    planAndExecArm("Step12_GoHome");
     arm_->setStartStateToCurrentState();
     std::this_thread::sleep_for(std::chrono::seconds(3));
 
