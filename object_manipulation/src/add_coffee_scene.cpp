@@ -18,7 +18,7 @@ public:
 
     // Add table as a box collision object
     moveit_msgs::msg::CollisionObject table;
-    table.header.frame_id = "world"; // Relative to base_link since attached
+    table.header.frame_id = "base_link"; // Relative to base_link since attached
     table.id = "table";
     table.operation = moveit_msgs::msg::CollisionObject::ADD;
 
@@ -32,10 +32,13 @@ public:
     // Table pose: Positioned under UR3 base (e.g., UR3 base at z=0.05 above
     // table, in left bottom corner of table with 0.1 padding)
     geometry_msgs::msg::PoseStamped table_pose;
-    table_pose.header.frame_id = "world";
-    table_pose.pose.position.x = 14.2;
-    table_pose.pose.position.y = -18.2;
-    table_pose.pose.position.z = 1.0;
+    table_pose.header.frame_id = "base_link";
+    // table_pose.pose.position.x = 14.2;
+    // table_pose.pose.position.y = -18.2;
+    // table_pose.pose.position.z = 1.0;
+    table_pose.pose.position.x = 0.30;
+    table_pose.pose.position.y = 0.0;
+    table_pose.pose.position.z = -0.025;
 
     table_pose.pose.orientation.x = 0.0;
     table_pose.pose.orientation.y = 0.0;

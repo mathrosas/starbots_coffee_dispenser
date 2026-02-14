@@ -43,21 +43,14 @@ static constexpr double RETREAT_Z_DELTA = +0.30;  // up 30cm (pick retreat)
 // Cartesian planning
 static constexpr double EEF_STEP = 0.01;
 static constexpr double JUMP_THRESHOLD = 0.0;
-static constexpr double CARTESIAN_MIN_FRACTION = 0.00;
+static constexpr double CARTESIAN_MIN_FRACTION = 0.50; //0.72
 
-// Place poses you want (from your second script)
-static constexpr double PLACE_X = -0.34;
+// Place poses
+static constexpr double PLACE_X = -0.34; //0.34
 static constexpr double PLACE_Y = -0.0045;
-static constexpr double PLACE_Z_PRE = -0.1861;
-static constexpr double PLACE_Z_DROP = -0.5861;
+static constexpr double PLACE_Z_PRE = -0.20;
 
-// Optional intermediate pose from your second script
-static constexpr double AFTER_RELEASE_X = -0.337211;
-static constexpr double AFTER_RELEASE_Y = 0.0;
-static constexpr double AFTER_RELEASE_Z = 0.3;
-
-// Step 7 rotate delta: you wrote "+90°" but your working code uses +120°
-// Keep +120° to match behavior. Change to M_PI/2 if you truly want 90°.
+// Step 7 rotate delta
 static constexpr double SHOULDER_PAN_DELTA_RAD = 2.0 * M_PI / 3.0; // +120deg
 
 // Z-down quaternion (180 deg about X): (-1, 0, 0, 0)
@@ -407,7 +400,7 @@ private:
     waypoints.push_back(cur);
 
     const double fraction = arm_->computeCartesianPath(
-        waypoints, EEF_STEP, JUMP_THRESHOLD, cart_traj_);
+        waypoints, EEF_STEP, JUMP_THRESHOLD, cart_traj_, true);
 
     if (fraction < CARTESIAN_MIN_FRACTION) {
       RCLCPP_ERROR(LOGGER,
