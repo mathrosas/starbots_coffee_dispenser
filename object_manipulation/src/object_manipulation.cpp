@@ -43,7 +43,7 @@ static constexpr double RETREAT_Z_DELTA = +0.30;  // up 30cm (pick retreat)
 // Cartesian planning
 static constexpr double EEF_STEP = 0.01;
 static constexpr double JUMP_THRESHOLD = 0.0;
-static constexpr double CARTESIAN_MIN_FRACTION = 0.90;
+static constexpr double CARTESIAN_MIN_FRACTION = 0.00;
 
 // Place poses you want (from your second script)
 static constexpr double PLACE_X = -0.34;
