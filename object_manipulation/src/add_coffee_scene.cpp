@@ -72,29 +72,29 @@ public:
     // allowCollision("table", "base_link");
     // RCLCPP_INFO(get_logger(), "ACM: allowed table <-> base_link");
 
-    // Add wall (tall thin box)
-    moveit_msgs::msg::CollisionObject wall;
-    wall.header.frame_id = "world";
-    wall.id = "wall";
-    wall.operation = moveit_msgs::msg::CollisionObject::ADD;
+    // Add cup (small cylinder)
+    moveit_msgs::msg::CollisionObject cup;
+    cup.header.frame_id = "base_link";
+    cup.id = "cup";
+    cup.operation = moveit_msgs::msg::CollisionObject::ADD;
 
-    shape_msgs::msg::SolidPrimitive wall_primitive;
-    wall_primitive.type = shape_msgs::msg::SolidPrimitive::BOX;
-    wall_primitive.dimensions = {1.6, 0.05, 2.0}; // width, thickness, height
-    wall.primitives.push_back(wall_primitive);
+    shape_msgs::msg::SolidPrimitive cup_primitive;
+    cup_primitive.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
+    cup_primitive.dimensions = {0.15, 0.03}; // height, width
+    cup.primitives.push_back(cup_primitive);
 
-    geometry_msgs::msg::PoseStamped wall_pose;
-    wall_pose.header.frame_id = "world";
-    wall_pose.pose.position.x = 0.3; // Behind the table
-    wall_pose.pose.position.y = 0.525;
-    wall_pose.pose.position.z = 0.0;
-    wall_pose.pose.orientation.w = 1.0; // No rotation
-    wall.primitive_poses.push_back(wall_pose.pose);
+    geometry_msgs::msg::PoseStamped cup_pose;
+    cup_pose.header.frame_id = "base_link";
+    cup_pose.pose.position.x = 0.298; // Behind the table
+    cup_pose.pose.position.y = 0.330;
+    cup_pose.pose.position.z = 0.035;
+    cup_pose.pose.orientation.w = 1.0; // No rotation
+    cup.primitive_poses.push_back(cup_pose.pose);
 
     // Apply to scene
     // MR
-    // planning_scene_interface_->applyCollisionObject(wall);
-    RCLCPP_INFO(get_logger(), "Added wall to planning scene");
+    // planning_scene_interface_->applyCollisionObject(cup);
+    // RCLCPP_INFO(get_logger(), "Added cup to planning scene");
 
     RCLCPP_INFO(get_logger(),
                 "Scene objects added successfully. Node spinning...");

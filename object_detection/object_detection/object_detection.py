@@ -21,10 +21,9 @@ from custom_msgs.msg import DetectedSurfaces, DetectedObjects
 # =========================
 
 # Fixed cup pose (in base_link)
-# CUP_X = 0.218
-CUP_X = 0.318
-CUP_Y = 0.350
-CUP_Z = 0.035
+CUP_X = 0.298 #0.318
+CUP_Y = 0.330 # 0.350
+CUP_Z = 0.035 # as is
 CUP_FRAME_PARENT = "base_link"
 CUP_FRAME_CHILD  = "cup"
 
@@ -76,10 +75,21 @@ class ObjectDetection(Node):
     Also:
       • Publishes a STATIC TF 'cup' at a hard-coded pose (CUP_X/Y/Z) in 'base_link'.
       • Publishes STATIC TFs 'ch_<n>' (1-based) for each detected holder, parented to 'base_link'.
+
+    Option A:
+      • Stop republishing holder TFs every callback.
+      • Publish holder STATIC TFs once, and only re-publish if the set changes (count or centroid moves > eps).
     """
 
     def __init__(self) -> None:
         super().__init__('object_detection_node')
+
+        # Runtime tuning
+        self.declare_parameter('holder_offset_x', 0.0)
+        self.declare_parameter('holder_offset_y', 0.0)
+        self.declare_parameter('holder_offset_z', 0.0)
+        self.declare_parameter('holder_match_max_dist', 0.08)
+        self.declare_parameter('log_ordered_holders', False)
 
         # --- Subscription (wrist depth cloud) ---
         self.pc_sub_wrist = self.create_subscription(
@@ -99,8 +109,14 @@ class ObjectDetection(Node):
 
         # Static TF for fixed 'cup'
         self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
-        # Static TFs for cup holders (latched, updated each callback)
+        # Static TFs for cup holders (latched)
         self.holder_static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+
+        # --- Holder TF publish gating (Option A) ---
+        self.holders_tf_published = False
+        self.last_holder_centroids_raw: List[List[float]] = []
+        self.last_holder_centroids: List[List[float]] = []
+        self.holder_tf_eps = 0.005  # 5mm threshold; tweak if needed
 
         # Publish the static TF for the cup once at startup
         self.publish_static_cup_tf()
@@ -166,9 +182,22 @@ class ObjectDetection(Node):
                 min_dist=MIN_CENTROID_DISTANCE
             )
 
+            # Keep IDs stable across callbacks (ch_1..ch_n) to prevent target swap.
+            ch_centroids, ch_dims = self.stable_order_holders(
+                ch_centroids, ch_dims, tray_center
+            )
+
+            if bool(self.get_parameter('log_ordered_holders').value) and ch_centroids:
+                ordered = ", ".join(
+                    [f"ch_{i+1}=({c[0]:.3f},{c[1]:.3f},{c[2]:.3f})"
+                     for i, c in enumerate(ch_centroids)]
+                )
+                self.get_logger().info(f"[HOLDER_ORDER] {ordered}")
+
             # 5) publish markers + messages
             self.publish_tray([tray_center], [tray_dim_main])
             self.publish_cupholders(ch_centroids, ch_dims)
+            self.last_holder_centroids_raw = [c[:] for c in ch_centroids]
 
         except Exception as e:
             self.get_logger().error(f"[ObjectDetection] Error in callback: {e}")
@@ -196,9 +225,9 @@ class ObjectDetection(Node):
             # zero-copy-ish parsing (assumes XYZ float32 at offsets 0/4/8)
             for i in range(n):
                 s = i * step
-                x = np.frombuffer(msg.data[s:s+4],       dtype=np.float32, count=1)[0]
-                y = np.frombuffer(msg.data[s+4:s+8],     dtype=np.float32, count=1)[0]
-                z = np.frombuffer(msg.data[s+8:s+12],    dtype=np.float32, count=1)[0]
+                x = np.frombuffer(msg.data[s:s+4],    dtype=np.float32, count=1)[0]
+                y = np.frombuffer(msg.data[s+4:s+8],  dtype=np.float32, count=1)[0]
+                z = np.frombuffer(msg.data[s+8:s+12], dtype=np.float32, count=1)[0]
                 pts[i, :] = (R @ np.array([x, y, z], dtype=np.float32)) + t
 
             cloud = pcl.PointCloud()
@@ -338,6 +367,66 @@ class ObjectDetection(Node):
 
         return accepted_c, accepted_d
 
+    # --------- Holder TF gating helpers (Option A) ---------
+    def _centroids_changed(self, centroids: List[List[float]], eps: float) -> bool:
+        """True if count changed or any centroid moved more than eps."""
+        if len(centroids) != len(self.last_holder_centroids):
+            return True
+        for a, b in zip(centroids, self.last_holder_centroids):
+            if np.linalg.norm(np.asarray(a) - np.asarray(b)) > eps:
+                return True
+        return False
+
+    def stable_order_holders(self,
+                             centroids: List[List[float]],
+                             dims: List[List[float]],
+                             tray_center: List[float]) -> Tuple[List[List[float]], List[List[float]]]:
+        """
+        Assign deterministic order to holders and keep it stable frame-to-frame.
+        Initial order uses angle around tray center; subsequent frames match nearest
+        previously ordered centroid within a distance gate.
+        """
+        if not centroids:
+            return [], []
+
+        tray_xy = np.asarray(tray_center[:2], dtype=float)
+        pairs = list(zip(centroids, dims))
+        pairs.sort(key=lambda p: float(np.arctan2(p[0][1] - tray_xy[1], p[0][0] - tray_xy[0])))
+
+        if not self.last_holder_centroids_raw:
+            ordered_c = [p[0] for p in pairs]
+            ordered_d = [p[1] for p in pairs]
+            return ordered_c, ordered_d
+
+        prev = [np.asarray(c, dtype=float) for c in self.last_holder_centroids_raw]
+        curr = [np.asarray(p[0], dtype=float) for p in pairs]
+        max_match = float(self.get_parameter('holder_match_max_dist').value)
+
+        used = set()
+        ordered_pairs = []
+        for p_prev in prev:
+            best_i = -1
+            best_d = float('inf')
+            for i, c_now in enumerate(curr):
+                if i in used:
+                    continue
+                d = float(np.linalg.norm(c_now - p_prev))
+                if d < best_d:
+                    best_d = d
+                    best_i = i
+            if best_i >= 0 and best_d <= max_match:
+                ordered_pairs.append(pairs[best_i])
+                used.add(best_i)
+
+        # Append unmatched detections in deterministic angle order
+        for i, pair in enumerate(pairs):
+            if i not in used:
+                ordered_pairs.append(pair)
+
+        ordered_c = [p[0] for p in ordered_pairs]
+        ordered_d = [p[1] for p in ordered_pairs]
+        return ordered_c, ordered_d
+
     # --------- Publishing ---------
     def publish_tray(self, centroids: List[List[float]], dims: List[List[float]]) -> None:
         ma = MarkerArray()
@@ -368,11 +457,20 @@ class ObjectDetection(Node):
             self.tray_marker_pub.publish(ma)
 
     def publish_cupholders(self, centroids: List[List[float]], dims: List[List[float]]) -> None:
+        off_x = float(self.get_parameter('holder_offset_x').value)
+        off_y = float(self.get_parameter('holder_offset_y').value)
+        off_z = float(self.get_parameter('holder_offset_z').value)
+
+        shifted_centroids = [
+            [float(c[0]) + off_x, float(c[1]) + off_y, float(c[2]) + off_z]
+            for c in centroids
+        ]
+
         ma = MarkerArray()
         h = float(CUP_MARKER_HEIGHT)
         text_h = float(TEXT_HEIGHT_OFFSET)
 
-        for i, (c, d) in enumerate(zip(centroids, dims)):
+        for i, (c, d) in enumerate(zip(shifted_centroids, dims)):
             diameter = float(max(d[0], d[1]))
             radius = diameter / 2.0
             one_based = i + 1  # ch_1, ch_2, ...
@@ -396,7 +494,7 @@ class ObjectDetection(Node):
             txt.id = i + 1000
             txt.type = Marker.TEXT_VIEW_FACING
             txt.action = Marker.ADD
-            txt.text = f"ch_{one_based}"  # show ch_1, ch_2, ...
+            txt.text = f"ch_{one_based}"
             txt.pose.position.x = float(c[0])
             txt.pose.position.y = float(c[1])
             txt.pose.position.z = float(c[2]) + text_h
@@ -404,7 +502,7 @@ class ObjectDetection(Node):
             txt.scale.x = txt.scale.y = txt.scale.z = 0.05
             txt.color.r = 0.0
             txt.color.g = 0.0
-            txt.color.b = 1.0  # Blue
+            txt.color.b = 1.0
             txt.color.a = 0.95
             ma.markers.append(txt)
 
@@ -419,9 +517,13 @@ class ObjectDetection(Node):
 
         self.cupholder_marker_pub.publish(ma)
 
-        # Publish STATIC TFs per holder (latched). Re-sending updates the latched pose.
-        if PUBLISH_HOLDER_TFS:
-            self.publish_static_cupholder_tfs(centroids)
+        # Option A: Publish STATIC TFs once, and only update if the set changes
+        if PUBLISH_HOLDER_TFS and shifted_centroids:
+            if (not self.holders_tf_published) or self._centroids_changed(shifted_centroids, self.holder_tf_eps):
+                self.publish_static_cupholder_tfs(shifted_centroids)
+                self.holders_tf_published = True
+                self.last_holder_centroids = [c[:] for c in shifted_centroids]
+                self.get_logger().info("[TF] Cup-holder STATIC TFs updated (gated).")
 
     # --------- Static TF helpers ---------
     def publish_static_cup_tf(self) -> None:
@@ -440,7 +542,6 @@ class ObjectDetection(Node):
         Publish one STATIC TF per detected cup-holder:
             parent: base_link
             child : ch_<n>  (1-based)
-        Re-publishing with the same child updates the latched transform.
         """
         if not centroids:
             return
@@ -452,15 +553,16 @@ class ObjectDetection(Node):
             ts = TransformStamped()
             ts.header.stamp = now
             ts.header.frame_id = CUP_FRAME_PARENT  # base_link
-            ts.child_frame_id  = f"{CUP_HOLDER_FRAME_PREFIX}{one_based}"  # ch_1, ch_2, ...
+            ts.child_frame_id  = f"{CUP_HOLDER_FRAME_PREFIX}{one_based}"
             ts.transform.translation.x = float(c[0])
             ts.transform.translation.y = float(c[1])
             ts.transform.translation.z = float(c[2])
-            ts.transform.rotation.w = 1.0  # identity orientation; adjust if needed
+            ts.transform.rotation.w = 1.0  # identity orientation
             tfs.append(ts)
 
         self.holder_static_broadcaster.sendTransform(tfs)
         self.get_logger().info(f"Published {len(tfs)} STATIC TFs for cup-holders (ch_#).")
+
 
 # ------------ main ------------
 def main(args=None) -> None:
