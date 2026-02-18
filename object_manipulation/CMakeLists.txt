@@ -43,4 +43,8 @@ install(TARGETS object_manipulation add_coffee_scene
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
 ament_package()
