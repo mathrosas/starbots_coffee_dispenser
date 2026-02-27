@@ -1,4 +1,3 @@
-// object_manipulation.cpp
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 
@@ -142,7 +141,7 @@ public:
     RCLCPP_INFO(LOGGER, "End Effector Link: %s",
                 arm_->getEndEffectorLink().c_str());
 
-    arm_->setPlanningTime(5.0);
+    arm_->setPlanningTime(60.0);
     arm_->setNumPlanningAttempts(20);
     arm_->setGoalPositionTolerance(0.005);
     arm_->setGoalOrientationTolerance(0.05);

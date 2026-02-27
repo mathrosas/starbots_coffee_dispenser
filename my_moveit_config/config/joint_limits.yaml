@@ -10,9 +10,9 @@ default_acceleration_scaling_factor: 0.1
 joint_limits:
   elbow_joint:
     has_velocity_limits: true
-    max_velocity: 3.1415926535897931
+    max_velocity: 2.14
     has_acceleration_limits: false
-    max_acceleration: 0.0
+    max_acceleration: 2.0
     has_position_limits: true
     min_position: -3.1415926535897931
     max_position: 3.1415926535897931
