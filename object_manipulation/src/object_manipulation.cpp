@@ -2,6 +2,8 @@
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 
 #include <custom_msgs/msg/detected_objects.hpp>
+#include <moveit_msgs/msg/display_robot_state.hpp>
+#include <moveit_msgs/msg/display_trajectory.hpp>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
 
 #include <rclcpp/executors/single_threaded_executor.hpp>
@@ -9,410 +11,365 @@
 
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <future>
+#include <iomanip>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
-// --------------------
-// Program configuration
-// --------------------
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("object_manipulation");
-
-// MoveIt groups (must match your SRDF)
+// program variables
+static const rclcpp::Logger LOGGER = rclcpp::get_logger("move_group_node");
 static const std::string PLANNING_GROUP_ROBOT = "ur_manipulator";
 static const std::string PLANNING_GROUP_GRIPPER = "gripper";
-
-// Cupholder detection
+static const std::string REF_FRAME = "base_link";
 static const std::string CUPHOLDER_TOPIC = "/cup_holder_detected";
 
-// Frames (your python publishes positions in base_link)
-static const std::string REF_FRAME = "base_link";
+// offsets / “magic numbers”:
+static constexpr double PREGRASP_Z_OFFSET = 0.30; // 20 cm above detected object
+static constexpr double APPROACH_Z_DELTA = -0.12; // straight down 8.5 cm
+static constexpr double RETREAT_Z_DELTA = +0.30;  // straight up 8.5 cm
 
-// -------- Fixed cup pose (pick test) --------
-static constexpr double FIXED_CUP_X = 0.298;
-static constexpr double FIXED_CUP_Y = 0.330;
+// project defaults for fixed-cup mode
+static constexpr double FIXED_CUP_X = 0.299;
+static constexpr double FIXED_CUP_Y = 0.331;
 static constexpr double FIXED_CUP_Z = 0.035;
 
-// -------- Motion tuning --------
-static constexpr double PREGRASP_Z_OFFSET = 0.30; // above cup
-static constexpr double PICK_APPROACH_Z_DELTA = -0.12;
-static constexpr double PICK_RETREAT_Z_DELTA = +0.30;
-
-// Cartesian planning
-static constexpr double EEF_STEP = 0.01;
-static constexpr double JUMP_THRESHOLD = 0.0;
-static constexpr double CARTESIAN_MIN_FRACTION = 0.50;
-
-// Step rotate delta (your logic)
-static constexpr double SHOULDER_PAN_DELTA_RAD = 2.0 * M_PI / 3.0; // +120deg
-
-// Z-down quaternion (180 deg about X): (-1, 0, 0, 0)
-static inline geometry_msgs::msg::Quaternion zDownQuat() {
-  geometry_msgs::msg::Quaternion q;
-  q.x = -1.0;
-  q.y = 0.0;
-  q.z = 0.0;
-  q.w = 0.0;
-  return q;
-}
-
-class ObjectManipulation {
+class PickAndPlacePerception {
 public:
-  using MoveGroupInterface = moveit::planning_interface::MoveGroupInterface;
-  using Plan = MoveGroupInterface::Plan;
-  using RobotTrajectory = moveit_msgs::msg::RobotTrajectory;
-  using DetectedObjectsMsg = custom_msgs::msg::DetectedObjects;
+  using DetectedObject = custom_msgs::msg::DetectedObjects;
 
-  explicit ObjectManipulation(const rclcpp::Node::SharedPtr &base_node)
-      : base_node_(base_node) {
-    RCLCPP_INFO(LOGGER, "[INIT] Initializing ObjectManipulation...");
+  PickAndPlacePerception(rclcpp::Node::SharedPtr base_node_)
+      : base_node_(base_node_) {
+    RCLCPP_INFO(LOGGER, "Initializing Class: Pick And Place Perception...");
 
     rclcpp::NodeOptions node_options;
     node_options.automatically_declare_parameters_from_overrides(true);
 
+    // initialize move_group node
     move_group_node_ =
         rclcpp::Node::make_shared("move_group_node", node_options);
-
-    // Always force sim time for this node (still allow overriding via ros-args)
     ensure_sim_time_true(move_group_node_);
-    if (base_node_)
+    if (base_node_) {
       ensure_sim_time_true(base_node_);
+    }
 
-    // ---- Placement tuning parameters (runtime) ----
-    // Guard declarations because ros-args overrides may auto-declare them.
-    if (!move_group_node_->has_parameter("holder_dx"))
-      move_group_node_->declare_parameter<double>("holder_dx", 0.0);
-    if (!move_group_node_->has_parameter("holder_dy"))
-      move_group_node_->declare_parameter<double>("holder_dy", 0.0);
-    if (!move_group_node_->has_parameter("holder_dz"))
-      move_group_node_->declare_parameter<double>("holder_dz", 0.0);
-
-    if (!move_group_node_->has_parameter("cup_dx"))
-      move_group_node_->declare_parameter<double>("cup_dx", 0.0);
-    if (!move_group_node_->has_parameter("cup_dy"))
-      move_group_node_->declare_parameter<double>("cup_dy", 0.0);
-    if (!move_group_node_->has_parameter("cup_dz"))
-      move_group_node_->declare_parameter<double>("cup_dz", 0.0);
-
-    if (!move_group_node_->has_parameter("place_hover_z_offset"))
-      move_group_node_->declare_parameter<double>("place_hover_z_offset", 0.20);
-    if (!move_group_node_->has_parameter("place_insert_z_delta"))
-      move_group_node_->declare_parameter<double>("place_insert_z_delta",
-                                                  -0.23);
-    if (!move_group_node_->has_parameter("place_hover_min_z"))
-      move_group_node_->declare_parameter<double>("place_hover_min_z", -0.30);
-    if (!move_group_node_->has_parameter("adaptive_insert_to_place"))
-      move_group_node_->declare_parameter<bool>("adaptive_insert_to_place",
-                                                true);
-
-    // Which cupholder to use (Option: -p ch:=ch_1)
-    if (!move_group_node_->has_parameter("ch"))
+    if (!move_group_node_->has_parameter("cup_x")) {
+      move_group_node_->declare_parameter<double>("cup_x", FIXED_CUP_X);
+    }
+    if (!move_group_node_->has_parameter("cup_y")) {
+      move_group_node_->declare_parameter<double>("cup_y", FIXED_CUP_Y);
+    }
+    if (!move_group_node_->has_parameter("cup_z")) {
+      move_group_node_->declare_parameter<double>("cup_z", FIXED_CUP_Z);
+    }
+    if (!move_group_node_->has_parameter("ch")) {
       move_group_node_->declare_parameter<std::string>("ch", "ch_1");
-
-    // Repetition support (optional): -p repeat:=3 (default 1)
-    if (!move_group_node_->has_parameter("repeat"))
-      move_group_node_->declare_parameter<int>("repeat", 1);
-
-    // Parse target holder from param
+    }
     const auto ch = move_group_node_->get_parameter("ch").as_string();
     target_holder_id_ = parse_ch_to_id(ch);
 
-    RCLCPP_INFO(LOGGER, "[INIT] Target cupholder param ch='%s' -> id=%d",
-                ch.c_str(), target_holder_id_);
-
-    wait_ros_time_active(move_group_node_);
-
     executor_.add_node(move_group_node_);
-    executor_thread_ = std::thread([this]() { executor_.spin(); });
+    executor_thread_ = std::thread([this]() { this->executor_.spin(); });
 
-    arm_ = std::make_shared<MoveGroupInterface>(move_group_node_,
-                                                PLANNING_GROUP_ROBOT);
-    gripper_ = std::make_shared<MoveGroupInterface>(move_group_node_,
-                                                    PLANNING_GROUP_GRIPPER);
+    // initialize move_group interfaces
+    move_group_robot_ = std::make_shared<MoveGroupInterface>(
+        move_group_node_, PLANNING_GROUP_ROBOT);
+    move_group_gripper_ = std::make_shared<MoveGroupInterface>(
+        move_group_node_, PLANNING_GROUP_GRIPPER);
 
-    arm_->startStateMonitor();
-    gripper_->startStateMonitor();
+    move_group_robot_->setPoseReferenceFrame(REF_FRAME);
+    move_group_robot_->setPlanningTime(8.0);
+    move_group_robot_->setNumPlanningAttempts(20);
+    move_group_robot_->setGoalPositionTolerance(0.001);
+    move_group_robot_->setGoalOrientationTolerance(0.05);
+    move_group_robot_->setMaxVelocityScalingFactor(0.3);
+    move_group_robot_->setMaxAccelerationScalingFactor(0.3);
 
-    wait_for_current_state(arm_, 5);
+    move_group_gripper_->setGoalTolerance(0.0001);
+    move_group_gripper_->setMaxVelocityScalingFactor(
+        0.01); // Slow for precise/less jittery close
+    move_group_gripper_->setMaxAccelerationScalingFactor(0.01);
 
-    RCLCPP_INFO(LOGGER, "Planning Frame: %s", arm_->getPlanningFrame().c_str());
-    RCLCPP_INFO(LOGGER, "End Effector Link: %s",
-                arm_->getEndEffectorLink().c_str());
+    move_group_robot_->startStateMonitor();
+    move_group_gripper_->startStateMonitor();
 
-    arm_->setPlanningTime(60.0);
-    arm_->setNumPlanningAttempts(20);
-    arm_->setGoalPositionTolerance(0.005);
-    arm_->setGoalOrientationTolerance(0.05);
-    arm_->setMaxVelocityScalingFactor(0.3);
-    arm_->setMaxAccelerationScalingFactor(0.3);
+    current_state_robot_ = move_group_robot_->getCurrentState(10);
+    if (!current_state_robot_) {
+      throw std::runtime_error(
+          "Could not get current robot state for arm group.");
+    }
+    current_state_gripper_ = move_group_gripper_->getCurrentState(10);
+    if (!current_state_gripper_) {
+      throw std::runtime_error(
+          "Could not get current robot state for gripper group.");
+    }
 
-    gripper_->setGoalTolerance(0.0001);
-    gripper_->setMaxVelocityScalingFactor(0.05);
-    gripper_->setMaxAccelerationScalingFactor(0.05);
+    joint_model_group_robot_ =
+        current_state_robot_->getJointModelGroup(PLANNING_GROUP_ROBOT);
+    joint_model_group_gripper_ =
+        current_state_gripper_->getJointModelGroup(PLANNING_GROUP_GRIPPER);
 
-    arm_->setPoseReferenceFrame(REF_FRAME);
-
-    // Subscribe to cupholder detections; we will filter by target_holder_id_
-    cupholder_sub_ = move_group_node_->create_subscription<DetectedObjectsMsg>(
+    cupholder_promise_ = std::make_shared<std::promise<DetectedObject>>();
+    cupholder_future_ = cupholder_promise_->get_future();
+    cupholder_sub_ = move_group_node_->create_subscription<DetectedObject>(
         CUPHOLDER_TOPIC, 10,
-        std::bind(&ObjectManipulation::cupholder_callback, this,
+        std::bind(&PickAndPlacePerception::cupholder_callback, this,
                   std::placeholders::_1));
 
-    RCLCPP_INFO(LOGGER, "[INIT] Subscribed to %s (custom_msgs/DetectedObjects)",
-                CUPHOLDER_TOPIC.c_str());
-    RCLCPP_INFO(LOGGER, "[INIT] ObjectManipulation ready.");
+    // print out basic system information
+    RCLCPP_INFO(LOGGER, "Planning Frame: %s",
+                move_group_robot_->getPlanningFrame().c_str());
+    RCLCPP_INFO(LOGGER, "End Effector Link: %s",
+                move_group_robot_->getEndEffectorLink().c_str());
+    RCLCPP_INFO(LOGGER, "Target cupholder param ch='%s' -> id=%d", ch.c_str(),
+                target_holder_id_);
+
+    for (const auto &name : move_group_robot_->getJointModelGroupNames()) {
+      RCLCPP_INFO(LOGGER, "Available group: %s", name.c_str());
+    }
+
+    // get current state of robot and gripper
+    current_state_robot_->copyJointGroupPositions(joint_model_group_robot_,
+                                                  joint_group_positions_robot_);
+    current_state_gripper_->copyJointGroupPositions(
+        joint_model_group_gripper_, joint_group_positions_gripper_);
+
+    // set start state of robot and gripper to current state
+    move_group_robot_->setStartStateToCurrentState();
+    move_group_gripper_->setStartStateToCurrentState();
+
+    // indicate initialization
+    RCLCPP_INFO(LOGGER, "Class Initialized: Pick And Place Perception");
   }
 
-  ~ObjectManipulation() {
+  ~PickAndPlacePerception() {
     executor_.cancel();
-    if (executor_thread_.joinable())
+    if (executor_thread_.joinable()) {
       executor_thread_.join();
-    RCLCPP_INFO(LOGGER, "[EXIT] ObjectManipulation shutdown.");
+    }
+    RCLCPP_INFO(LOGGER, "Class Terminated: Pick And Place Perception");
   }
 
-  void execute() {
+  void execute_trajectory_plan() {
     using namespace std::chrono_literals;
 
-    // ------------------------------------------------------------
-    // 0) WAIT FOR TARGET CUPHOLDER DETECTION
-    // ------------------------------------------------------------
-    RCLCPP_INFO(LOGGER, "[WAIT] Waiting for target cupholder id=%d on %s ...",
+    RCLCPP_INFO(LOGGER, "Waiting for target cupholder id=%d on %s ...",
                 target_holder_id_, CUPHOLDER_TOPIC.c_str());
-
-    while (rclcpp::ok() && !have_latest_holder_) {
-      std::this_thread::sleep_for(100ms);
+    while (rclcpp::ok()) {
+      if (cupholder_future_.wait_for(5s) == std::future_status::ready) {
+        break;
+      }
+      RCLCPP_INFO(LOGGER, "No target cupholder yet, waiting another 5s...");
     }
-    if (!rclcpp::ok())
+    if (!rclcpp::ok()) {
       return;
-
-    // Read tuning params
-    const double holder_dx =
-        move_group_node_->get_parameter("holder_dx").as_double();
-    const double holder_dy =
-        move_group_node_->get_parameter("holder_dy").as_double();
-    const double holder_dz =
-        move_group_node_->get_parameter("holder_dz").as_double();
-
-    const double cup_dx = move_group_node_->get_parameter("cup_dx").as_double();
-    const double cup_dy = move_group_node_->get_parameter("cup_dy").as_double();
-    const double cup_dz = move_group_node_->get_parameter("cup_dz").as_double();
-
-    const double place_hover_z_offset =
-        move_group_node_->get_parameter("place_hover_z_offset").as_double();
-    const double place_insert_z_delta =
-        move_group_node_->get_parameter("place_insert_z_delta").as_double();
-    const double place_hover_min_z =
-        move_group_node_->get_parameter("place_hover_min_z").as_double();
-    const bool adaptive_insert_to_place =
-        move_group_node_->get_parameter("adaptive_insert_to_place").as_bool();
-
-    int repeat = move_group_node_->get_parameter("repeat").as_int();
-    if (repeat < 1)
-      repeat = 1;
-
-    RCLCPP_INFO(
-        LOGGER,
-        "[TUNE] holder_d=(%.3f, %.3f, %.3f) cup_d=(%.3f, %.3f, %.3f) "
-        "hover_z=%.3f insert_dz=%.3f min_hover_z=%.3f adaptive_insert=%s "
-        "repeat=%d",
-        holder_dx, holder_dy, holder_dz, cup_dx, cup_dy, cup_dz,
-        place_hover_z_offset, place_insert_z_delta, place_hover_min_z,
-        adaptive_insert_to_place ? "true" : "false", repeat);
-
-    // Snapshot holder pose at start (you can also keep updating per loop if you
-    // want)
-    DetectedObjectsMsg holder = latest_holder_;
-
+    }
+    const auto holder = cupholder_future_.get();
     RCLCPP_INFO(LOGGER,
-                "[TARGET] Using holder id=%d at (%.3f, %.3f, %.3f) w=%.3f "
-                "h=%.3f t=%.3f",
+                "Using cupholder id=%u pose=(%.3f, %.3f, %.3f) w=%.3f h=%.3f "
+                "t=%.3f",
                 holder.object_id, holder.position.x, holder.position.y,
                 holder.position.z, holder.width, holder.height,
                 holder.thickness);
 
-    // ------------------------------------------------------------
-    // 1) PICK from fixed cup pose (your existing test)
-    // ------------------------------------------------------------
-    const double cup_x = FIXED_CUP_X;
-    const double cup_y = FIXED_CUP_Y;
-    const double cup_z = FIXED_CUP_Z;
+    const double cup_x = move_group_node_->get_parameter("cup_x").as_double();
+    const double cup_y = move_group_node_->get_parameter("cup_y").as_double();
+    const double cup_z = move_group_node_->get_parameter("cup_z").as_double();
 
     const double pre_x = cup_x;
     const double pre_y = cup_y;
     const double pre_z = cup_z + PREGRASP_Z_OFFSET;
+    const double place_x = holder.position.x;
+    const double place_y = holder.position.y;
+    const double place_z = holder.position.z;
 
-    RCLCPP_INFO(LOGGER, "[RUN] Starting sequence.");
+    RCLCPP_INFO(LOGGER, "Using fixed cup pose at (%.3f, %.3f, %.3f)", cup_x,
+                cup_y, cup_z);
+    RCLCPP_INFO(LOGGER, "Planning and Executing Pick And Place Perception...");
 
-    // Step 1: Home
-    RCLCPP_INFO(LOGGER, "[1] Go to named pose: home");
-    arm_->setStartStateToCurrentState();
-    arm_->setNamedTarget("home");
-    if (!plan_and_execute_arm("[1] home"))
+    // 1. go to pregrasp
+    RCLCPP_INFO(LOGGER, "Going to Pregrasp Position (%.3f, %.3f, %.3f)...",
+                pre_x, pre_y, pre_z);
+    setup_goal_pose_target(pre_x, pre_y, pre_z, -1.000, +0.000, +0.000, +0.000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
       return;
-
-    // Step 2: Open gripper
-    RCLCPP_INFO(LOGGER, "[2] Open gripper");
-    set_gripper_named("open");
-    if (!plan_and_execute_gripper("[2] open"))
-      return;
-
-    // Step 3: Pregrasp above cup (Z-down)
-    RCLCPP_INFO(LOGGER, "[3] Pregrasp above cup (%.3f, %.3f, %.3f)", pre_x,
-                pre_y, pre_z);
-    set_pose_target(pre_x, pre_y, pre_z, zDownQuat());
-    if (!plan_and_execute_arm("[3] pregrasp"))
-      return;
-
-    // Step 4: Approach down (Cartesian)
-    RCLCPP_INFO(LOGGER, "[4] Approach down %.3f m (Cartesian)",
-                PICK_APPROACH_Z_DELTA);
-    if (!cartesian_delta(0.0, 0.0, PICK_APPROACH_Z_DELTA, "[4] approach_pick"))
-      return;
-
-    // Step 5: Close gripper
-    RCLCPP_INFO(LOGGER, "[5] Close gripper");
-    set_gripper_named("close");
-    if (!plan_and_execute_gripper("[5] close"))
-      return;
-
-    std::this_thread::sleep_for(500ms);
-
-    // Step 6: Retreat up (Cartesian)
-    RCLCPP_INFO(LOGGER, "[6] Retreat up %.3f m (Cartesian)",
-                PICK_RETREAT_Z_DELTA);
-    if (!cartesian_delta(0.0, 0.0, PICK_RETREAT_Z_DELTA, "[6] retreat_pick"))
-      return;
-
-    // Step 7: Rotate shoulder_pan_joint (your existing logic)
-    RCLCPP_INFO(LOGGER, "[7] Rotate shoulder_pan_joint by +%.1f deg",
-                SHOULDER_PAN_DELTA_RAD * 180.0 / M_PI);
-    if (!rotate_shoulder_pan_relative(SHOULDER_PAN_DELTA_RAD,
-                                      "[7] rotate_shoulder_pan"))
-      return;
-
-    std::this_thread::sleep_for(500ms);
-    arm_->setStartStateToCurrentState();
-
-    // ------------------------------------------------------------
-    // 2) PLACE INTO CUPHOLDER (KURALME-STYLE), possibly repeated
-    // ------------------------------------------------------------
-
-    for (int k = 1; k <= repeat && rclcpp::ok(); ++k) {
-      // If you want to re-acquire the latest holder pose each time, uncomment:
-      // holder = latest_holder_;
-
-      // Build the “hole center” target in base_link, with calibration
-      const double hole_x = holder.position.x + holder_dx;
-      const double hole_y = holder.position.y + holder_dy;
-      const double hole_z = holder.position.z + holder_dz;
-
-      const double place_x = hole_x + cup_dx;
-      const double place_y = hole_y + cup_dy;
-      const double place_z = hole_z + cup_dz;
-
-      const double hover_x = place_x;
-      const double hover_y = place_y;
-      double hover_z = place_z + place_hover_z_offset;
-      if (hover_z < place_hover_min_z) {
-        RCLCPP_WARN(LOGGER, "[PLACE %d/%d] hover_z clamped from %.3f to %.3f",
-                    k, repeat, hover_z, place_hover_min_z);
-        hover_z = place_hover_min_z;
-      }
-
-      double insert_dz = place_insert_z_delta;
-      if (adaptive_insert_to_place) {
-        insert_dz = place_z - hover_z;
-      }
-
-      RCLCPP_INFO(LOGGER,
-                  "[PLACE %d/%d] holder id=%d hover=(%.3f, %.3f, %.3f) "
-                  "place=(%.3f, %.3f, %.3f) insert_dz=%.3f",
-                  k, repeat, holder.object_id, hover_x, hover_y, hover_z,
-                  place_x, place_y, place_z, insert_dz);
-
-      // Step 8: Move to hover above detected holder (Z-down)
-      set_pose_target(hover_x, hover_y, hover_z, zDownQuat());
-      if (!plan_and_execute_arm("[8] hover_holder")) {
-        RCLCPP_ERROR(LOGGER, "[PLACE %d/%d] Aborting: hover plan failed.", k,
-                     repeat);
-        return;
-      }
-
-      // Step 9: Insert straight down by fixed dz (kuralme style)
-      if (!cartesian_delta(0.0, 0.0, insert_dz, "[9] insert")) {
-        RCLCPP_ERROR(LOGGER, "[PLACE %d/%d] Aborting: insert motion failed.", k,
-                     repeat);
-        return;
-      }
-
-      // Step 10: Open gripper (release) ONLY on first placement attempt
-      // If you want to keep the cup after first attempt, remove this condition.
-      if (k == 1) {
-        RCLCPP_INFO(LOGGER, "[10] Open gripper (release)");
-        set_gripper_named("open");
-        if (!plan_and_execute_gripper("[10] release")) {
-          RCLCPP_ERROR(LOGGER, "[PLACE %d/%d] Aborting: release failed.", k,
-                       repeat);
-          return;
-        }
-        std::this_thread::sleep_for(500ms);
-        arm_->setStartStateToCurrentState();
-      }
-
-      // Step 11: Retreat up (undo insertion)
-      if (!cartesian_delta(0.0, 0.0, -insert_dz, "[11] retreat_place")) {
-        RCLCPP_ERROR(LOGGER,
-                     "[PLACE %d/%d] Aborting: retreat-after-place failed.", k,
-                     repeat);
-        return;
-      }
     }
 
-    // Step 12: Home
-    RCLCPP_INFO(LOGGER, "[12] Go to named pose: home");
-    arm_->setStartStateToCurrentState();
-    arm_->setNamedTarget("home");
-    if (!plan_and_execute_arm("[12] home"))
-      return;
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
-    RCLCPP_INFO(LOGGER, "[DONE] Sequence finished.");
+    // 2. open the gripper
+    RCLCPP_INFO(LOGGER, "Opening Gripper...");
+    setup_named_pose_gripper("open");
+    plan_trajectory_gripper();
+    if (!execute_trajectory_gripper()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 3. approach straight down
+    RCLCPP_INFO(LOGGER, "Approaching object...");
+    setup_waypoints_target(+0.000, +0.000, APPROACH_Z_DELTA);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 4. close the gripper
+    RCLCPP_INFO(LOGGER, "Closing Gripper...");
+    setup_named_pose_gripper("close");
+    plan_trajectory_gripper();
+    if (!execute_trajectory_gripper()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 5. retreat
+    RCLCPP_INFO(LOGGER, "Retreating...");
+    setup_waypoints_target(+0.000, +0.000, RETREAT_Z_DELTA);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 6. rotate shoulder
+    RCLCPP_INFO(LOGGER, "Rotate Shoulder Joint 120 degrees...");
+    current_state_robot_ = move_group_robot_->getCurrentState(10);
+    current_state_robot_->copyJointGroupPositions(joint_model_group_robot_,
+                                                  joint_group_positions_robot_);
+    setup_joint_value_target(
+        joint_group_positions_robot_[0] + 2.0 * M_PI / 3.0, // add 120 degrees
+        joint_group_positions_robot_[1], joint_group_positions_robot_[2],
+        joint_group_positions_robot_[3], joint_group_positions_robot_[4],
+        joint_group_positions_robot_[5]);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 7. go to pre-place position (from detected cupholder)
+    RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
+                place_x, place_y, place_z + 2*PREGRASP_Z_OFFSET);
+    setup_goal_pose_target(place_x, place_y,
+                           place_z + 2*PREGRASP_Z_OFFSET, -1.000,
+                           +0.000, +0.000, +0.000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 8. go to lower pre-place position (from detected cupholder)
+    RCLCPP_INFO(LOGGER, "Going to Lower Pre-place Position (%.3f, %.3f, %.3f)...",
+                place_x, place_y, place_z + PREGRASP_Z_OFFSET - 0.02);
+    setup_goal_pose_target(place_x, place_y,
+                           place_z + PREGRASP_Z_OFFSET - 0.02, -1.000,
+                           +0.000, +0.000, +0.000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 9. approach down to cupholder center
+    RCLCPP_INFO(LOGGER, "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
+                place_x, place_y, place_z);
+    setup_waypoints_target(+0.000, +0.000, -PREGRASP_Z_OFFSET);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 10. open the gripper
+    RCLCPP_INFO(LOGGER, "Opening Gripper...");
+    setup_named_pose_gripper("open");
+    plan_trajectory_gripper();
+    if (!execute_trajectory_gripper()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 11. Going to Initial Position
+    RCLCPP_INFO(LOGGER, "Going to Initial Position...");
+    setup_joint_value_target(+0.0000, -1.5708, +0.0000, -1.5708, +0.0000,
+                             +0.0000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return;
+    }
+
+    RCLCPP_INFO(LOGGER, "Pick And Place Perception Execution Complete");
   }
 
 private:
+  // using shorthand for lengthy class references
+  using MoveGroupInterface = moveit::planning_interface::MoveGroupInterface;
+  using JointModelGroup = moveit::core::JointModelGroup;
+  using RobotStatePtr = moveit::core::RobotStatePtr;
+  using Plan = MoveGroupInterface::Plan;
+  using Pose = geometry_msgs::msg::Pose;
+  using RobotTrajectory = moveit_msgs::msg::RobotTrajectory;
+
   rclcpp::Node::SharedPtr base_node_;
   rclcpp::Node::SharedPtr move_group_node_;
-
   rclcpp::executors::SingleThreadedExecutor executor_;
   std::thread executor_thread_;
 
-  std::shared_ptr<MoveGroupInterface> arm_;
-  std::shared_ptr<MoveGroupInterface> gripper_;
+  std::shared_ptr<MoveGroupInterface> move_group_robot_;
+  std::shared_ptr<MoveGroupInterface> move_group_gripper_;
 
-  Plan arm_plan_;
-  Plan gripper_plan_;
-  RobotTrajectory cart_traj_;
+  const JointModelGroup *joint_model_group_robot_{nullptr};
+  const JointModelGroup *joint_model_group_gripper_{nullptr};
 
-  rclcpp::Subscription<DetectedObjectsMsg>::SharedPtr cupholder_sub_;
+  std::vector<double> joint_group_positions_robot_;
+  RobotStatePtr current_state_robot_;
+  Plan kinematics_trajectory_plan_;
+  Pose target_pose_robot_;
+  bool plan_success_robot_{false};
 
-  // Target selection + latest holder cache
+  std::vector<double> joint_group_positions_gripper_;
+  RobotStatePtr current_state_gripper_;
+  Plan gripper_trajectory_plan_;
+  bool plan_success_gripper_{false};
+
+  std::vector<Pose> cartesian_waypoints_;
+  RobotTrajectory cartesian_trajectory_plan_;
+  const double jump_threshold_{0.0};
+  const double end_effector_step_{0.01};
+  double plan_fraction_robot_{0.0};
+
   int target_holder_id_{1};
-  DetectedObjectsMsg latest_holder_;
-  bool have_latest_holder_{false};
-
-  // -------- Helpers --------
-  static int parse_ch_to_id(const std::string &s) {
-    // Accept "ch_1", "ch_2", ... ; fallback to 1
-    if (s.rfind("ch_", 0) != 0)
-      return 1;
-    try {
-      int id = std::stoi(s.substr(3));
-      return (id >= 1) ? id : 1;
-    } catch (...) {
-      return 1;
-    }
-  }
+  std::shared_ptr<std::promise<DetectedObject>> cupholder_promise_;
+  std::future<DetectedObject> cupholder_future_;
+  rclcpp::Subscription<DetectedObject>::SharedPtr cupholder_sub_;
+  bool cupholder_received_{false};
 
   static void ensure_sim_time_true(const rclcpp::Node::SharedPtr &node) {
     try {
@@ -424,209 +381,181 @@ private:
     node->set_parameter(rclcpp::Parameter("use_sim_time", true));
   }
 
-  static void wait_ros_time_active(const rclcpp::Node::SharedPtr &node) {
-    using namespace std::chrono_literals;
-    RCLCPP_INFO(LOGGER, "[TIME] Waiting for ROS time to become active...");
-    auto start = std::chrono::steady_clock::now();
-    while (!node->get_clock()->ros_time_is_active()) {
-      if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
-        RCLCPP_WARN(LOGGER, "[TIME] ROS time not active after 5s. Continuing.");
-        break;
+  static int parse_ch_to_id(const std::string &s) {
+    try {
+      if (s.rfind("ch_", 0) == 0) {
+        const int id = std::stoi(s.substr(3));
+        return (id >= 1) ? id : 1;
       }
-      std::this_thread::sleep_for(50ms);
+      const int id = std::stoi(s);
+      return (id >= 1) ? id : 1;
+    } catch (...) {
+      return 1;
     }
-    RCLCPP_INFO(LOGGER, "[TIME] ros_time_is_active=%s",
-                node->get_clock()->ros_time_is_active() ? "true" : "false");
   }
 
-  static void
-  wait_for_current_state(const std::shared_ptr<MoveGroupInterface> &arm,
-                         int timeout_sec) {
-    using namespace std::chrono_literals;
-    RCLCPP_INFO(LOGGER, "[INIT] Waiting for /joint_states (up to %ds)...",
-                timeout_sec);
-    auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec);
-    while (std::chrono::steady_clock::now() < deadline) {
-      auto st = arm->getCurrentState(1.0);
-      if (st) {
-        RCLCPP_INFO(LOGGER, "[INIT] Current state received.");
-        return;
-      }
-      RCLCPP_WARN(LOGGER, "[INIT] Still waiting for /joint_states...");
-      std::this_thread::sleep_for(100ms);
+  void cupholder_callback(const DetectedObject::SharedPtr msg) {
+    if (cupholder_received_) {
+      return;
     }
-    RCLCPP_WARN(LOGGER, "[INIT] Proceeding without confirmed current state.");
+    if (static_cast<int>(msg->object_id) != target_holder_id_) {
+      return;
+    }
+    cupholder_received_ = true;
+    cupholder_promise_->set_value(*msg);
+    cupholder_sub_.reset();
+    RCLCPP_INFO(LOGGER, "Received target cupholder id=%u at (%.3f, %.3f, %.3f)",
+                msg->object_id, msg->position.x, msg->position.y,
+                msg->position.z);
   }
 
-  void cupholder_callback(const DetectedObjectsMsg::SharedPtr msg) {
-    // Only accept the chosen holder id
-    if (msg->object_id != target_holder_id_) {
-      RCLCPP_DEBUG(LOGGER, "[CB] Ignoring id=%d (want id=%d)", msg->object_id,
-                   target_holder_id_);
+  void setup_joint_value_target(float angle0, float angle1, float angle2,
+                                float angle3, float angle4, float angle5) {
+    joint_group_positions_robot_.resize(6);
+    joint_group_positions_robot_[0] = angle0; // Shoulder Pan
+    joint_group_positions_robot_[1] = angle1; // Shoulder Lift
+    joint_group_positions_robot_[2] = angle2; // Elbow
+    joint_group_positions_robot_[3] = angle3; // Wrist 1
+    joint_group_positions_robot_[4] = angle4; // Wrist 2
+    joint_group_positions_robot_[5] = angle5; // Wrist 3
+    move_group_robot_->setStartStateToCurrentState();
+    move_group_robot_->setJointValueTarget(joint_group_positions_robot_);
+  }
+
+  void setup_goal_pose_target(float pos_x, float pos_y, float pos_z,
+                              float quat_x, float quat_y, float quat_z,
+                              float quat_w) {
+    target_pose_robot_.position.x = pos_x;
+    target_pose_robot_.position.y = pos_y;
+    target_pose_robot_.position.z = pos_z;
+    target_pose_robot_.orientation.x = quat_x;
+    target_pose_robot_.orientation.y = quat_y;
+    target_pose_robot_.orientation.z = quat_z;
+    target_pose_robot_.orientation.w = quat_w;
+    move_group_robot_->setStartStateToCurrentState();
+    move_group_robot_->setPoseTarget(target_pose_robot_);
+  }
+
+  void plan_trajectory_kinematics() {
+    plan_success_robot_ =
+        (move_group_robot_->plan(kinematics_trajectory_plan_) ==
+         moveit::core::MoveItErrorCode::SUCCESS);
+  }
+
+  bool execute_trajectory_kinematics() {
+    if (plan_success_robot_) {
+      log_ee_and_joints("pre_execute_kinematics");
+      auto code = move_group_robot_->execute(kinematics_trajectory_plan_);
+      if (code != moveit::core::MoveItErrorCode::SUCCESS) {
+        RCLCPP_ERROR(LOGGER, "Robot Kinematics Trajectory Execute Failed !");
+        return false;
+      }
+      RCLCPP_INFO(LOGGER, "Robot Kinematics Trajectory Success !");
+      log_ee_and_joints("post_execute_kinematics");
+      return true;
+    }
+    RCLCPP_ERROR(LOGGER, "Robot Kinematics Trajectory Planning Failed !");
+    return false;
+  }
+
+  void setup_waypoints_target(float x_delta, float y_delta, float z_delta) {
+    cartesian_waypoints_.clear();
+    target_pose_robot_ = move_group_robot_->getCurrentPose().pose;
+    cartesian_waypoints_.push_back(target_pose_robot_);
+    target_pose_robot_.position.x += x_delta;
+    target_pose_robot_.position.y += y_delta;
+    target_pose_robot_.position.z += z_delta;
+    cartesian_waypoints_.push_back(target_pose_robot_);
+  }
+
+  void plan_trajectory_cartesian() {
+    plan_fraction_robot_ = move_group_robot_->computeCartesianPath(
+        cartesian_waypoints_, end_effector_step_, jump_threshold_,
+        cartesian_trajectory_plan_);
+  }
+
+  bool execute_trajectory_cartesian() {
+    // keep the original template behavior: execute for any non-negative
+    // fraction
+    if (plan_fraction_robot_ >= 0.0) {
+      log_ee_and_joints("pre_execute_cartesian");
+      auto code = move_group_robot_->execute(cartesian_trajectory_plan_);
+      if (code != moveit::core::MoveItErrorCode::SUCCESS) {
+        RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Execute Failed !");
+        return false;
+      }
+      RCLCPP_INFO(LOGGER,
+                  "Robot Cartesian Trajectory Success ! (fraction=%.2f)",
+                  plan_fraction_robot_);
+      log_ee_and_joints("post_execute_cartesian");
+      return true;
+    }
+    RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Failed !");
+    return false;
+  }
+
+  void setup_named_pose_gripper(std::string pose_name) {
+    move_group_gripper_->setStartStateToCurrentState();
+    move_group_gripper_->setNamedTarget(pose_name);
+  }
+
+  void plan_trajectory_gripper() {
+    plan_success_gripper_ =
+        (move_group_gripper_->plan(gripper_trajectory_plan_) ==
+         moveit::core::MoveItErrorCode::SUCCESS);
+  }
+
+  bool execute_trajectory_gripper() {
+    if (plan_success_gripper_) {
+      auto code = move_group_gripper_->execute(gripper_trajectory_plan_);
+      if (code != moveit::core::MoveItErrorCode::SUCCESS) {
+        RCLCPP_ERROR(LOGGER, "Gripper Action Command Execute Failed !");
+        return false;
+      }
+      RCLCPP_INFO(LOGGER, "Gripper Action Command Success !");
+      return true;
+    }
+    RCLCPP_ERROR(LOGGER, "Gripper Action Command Planning Failed !");
+    return false;
+  }
+
+  void log_ee_and_joints(const std::string &tag) {
+    const auto ee = move_group_robot_->getCurrentPose().pose;
+    auto state = move_group_robot_->getCurrentState(2.0);
+    if (!state || !joint_model_group_robot_) {
+      RCLCPP_WARN(LOGGER,
+                  "[STATE:%s] Unable to read current robot state for joints.",
+                  tag.c_str());
       return;
     }
 
-    latest_holder_ = *msg;
-    have_latest_holder_ = true;
+    std::vector<double> joints;
+    state->copyJointGroupPositions(joint_model_group_robot_, joints);
+
+    std::ostringstream joint_ss;
+    joint_ss << std::fixed << std::setprecision(4);
+    for (size_t i = 0; i < joints.size(); ++i) {
+      if (i > 0) {
+        joint_ss << ", ";
+      }
+      joint_ss << "j" << (i + 1) << "=" << joints[i];
+    }
 
     RCLCPP_INFO(LOGGER,
-                "[CB] Updated target holder id=%d pos=(%.3f, %.3f, %.3f) "
-                "w=%.3f h=%.3f t=%.3f",
-                msg->object_id, msg->position.x, msg->position.y,
-                msg->position.z, msg->width, msg->height, msg->thickness);
+                "[STATE:%s] ee=(%.3f, %.3f, %.3f) quat=(%.3f, %.3f, %.3f, "
+                "%.3f) joints=[%s]",
+                tag.c_str(), ee.position.x, ee.position.y, ee.position.z,
+                ee.orientation.x, ee.orientation.y, ee.orientation.z,
+                ee.orientation.w, joint_ss.str().c_str());
   }
-
-  void set_pose_target(double x, double y, double z,
-                       const geometry_msgs::msg::Quaternion &q) {
-    geometry_msgs::msg::Pose target;
-    target.position.x = x;
-    target.position.y = y;
-    target.position.z = z;
-    target.orientation = q;
-
-    arm_->clearPoseTargets();
-    arm_->setStartStateToCurrentState();
-    arm_->setPoseTarget(target);
-  }
-
-  void set_gripper_named(const std::string &name) {
-    gripper_->setStartStateToCurrentState();
-    gripper_->setNamedTarget(name);
-  }
-
-  bool plan_and_execute_arm(const std::string &tag) {
-    auto ok = (arm_->plan(arm_plan_) == moveit::core::MoveItErrorCode::SUCCESS);
-    if (!ok) {
-      RCLCPP_ERROR(LOGGER, "%s: ARM plan FAILED", tag.c_str());
-      return false;
-    }
-    auto code = arm_->execute(arm_plan_);
-    if (code != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(LOGGER, "%s: ARM execute FAILED (code=%d)", tag.c_str(),
-                   code.val);
-      return false;
-    }
-    RCLCPP_INFO(LOGGER, "%s: ARM execute OK", tag.c_str());
-    return true;
-  }
-
-  bool plan_and_execute_gripper(const std::string &tag) {
-    auto ok = (gripper_->plan(gripper_plan_) ==
-               moveit::core::MoveItErrorCode::SUCCESS);
-    if (!ok) {
-      RCLCPP_ERROR(LOGGER, "%s: GRIPPER plan FAILED", tag.c_str());
-      return false;
-    }
-    auto code = gripper_->execute(gripper_plan_);
-    if (code != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(LOGGER, "%s: GRIPPER execute FAILED (code=%d)", tag.c_str(),
-                   code.val);
-      return false;
-    }
-    RCLCPP_INFO(LOGGER, "%s: GRIPPER execute OK", tag.c_str());
-    return true;
-  }
-
-  bool cartesian_delta(double dx, double dy, double dz,
-                       const std::string &tag) {
-    std::vector<geometry_msgs::msg::Pose> waypoints;
-    auto cur = arm_->getCurrentPose().pose;
-
-    waypoints.push_back(cur);
-    cur.position.x += dx;
-    cur.position.y += dy;
-    cur.position.z += dz;
-    waypoints.push_back(cur);
-
-    const double fraction = arm_->computeCartesianPath(
-        waypoints, EEF_STEP, JUMP_THRESHOLD, cart_traj_, true);
-
-    if (fraction < CARTESIAN_MIN_FRACTION) {
-      RCLCPP_ERROR(LOGGER,
-                   "%s: Cartesian path FAILED (fraction=%.2f, need>=%.2f)",
-                   tag.c_str(), fraction, CARTESIAN_MIN_FRACTION);
-      return false;
-    }
-
-    auto code = arm_->execute(cart_traj_);
-    if (code != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(LOGGER, "%s: Cartesian execute FAILED (code=%d)",
-                   tag.c_str(), code.val);
-      return false;
-    }
-
-    RCLCPP_INFO(LOGGER, "%s: Cartesian execute OK (fraction=%.2f)", tag.c_str(),
-                fraction);
-    return true;
-  }
-
-  bool rotate_shoulder_pan_relative(double delta_rad, const std::string &tag) {
-    auto state = arm_->getCurrentState(1.0);
-    if (!state) {
-      RCLCPP_ERROR(LOGGER, "%s: could not get current state", tag.c_str());
-      return false;
-    }
-
-    const moveit::core::JointModelGroup *jmg =
-        state->getJointModelGroup(PLANNING_GROUP_ROBOT);
-    if (!jmg) {
-      RCLCPP_ERROR(LOGGER, "%s: no JointModelGroup for %s", tag.c_str(),
-                   PLANNING_GROUP_ROBOT.c_str());
-      return false;
-    }
-
-    std::vector<double> joints;
-    state->copyJointGroupPositions(jmg, joints);
-    const auto &names = jmg->getVariableNames();
-
-    int idx = -1;
-    for (size_t i = 0; i < names.size(); ++i) {
-      if (names[i] == "shoulder_pan_joint") {
-        idx = static_cast<int>(i);
-        break;
-      }
-    }
-    if (idx < 0 || static_cast<size_t>(idx) >= joints.size()) {
-      RCLCPP_ERROR(LOGGER, "%s: shoulder_pan_joint not found in group",
-                   tag.c_str());
-      return false;
-    }
-
-    joints[idx] += delta_rad;
-    while (joints[idx] > M_PI)
-      joints[idx] -= 2.0 * M_PI;
-    while (joints[idx] < -M_PI)
-      joints[idx] += 2.0 * M_PI;
-
-    arm_->setStartStateToCurrentState();
-    arm_->setJointValueTarget(joints);
-
-    Plan plan;
-    auto ok = (arm_->plan(plan) == moveit::core::MoveItErrorCode::SUCCESS);
-    if (!ok) {
-      RCLCPP_WARN(LOGGER, "%s: plan FAILED", tag.c_str());
-      return false;
-    }
-
-    auto code = arm_->execute(plan);
-    if (code != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(LOGGER, "%s: execute FAILED (code=%d)", tag.c_str(),
-                   code.val);
-      return false;
-    }
-    RCLCPP_INFO(LOGGER, "%s: execute OK", tag.c_str());
-    return true;
-  }
-};
+}; // class PickAndPlacePerception
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
-
-  auto base_node = std::make_shared<rclcpp::Node>("object_manipulation");
-  ObjectManipulation app(base_node);
-  app.execute();
-
+  std::shared_ptr<rclcpp::Node> base_node =
+      std::make_shared<rclcpp::Node>("pick_and_place_perception");
+  PickAndPlacePerception pick_and_place(base_node);
+  pick_and_place.execute_trajectory_plan();
   rclcpp::shutdown();
   return 0;
 }

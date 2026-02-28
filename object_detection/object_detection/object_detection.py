@@ -21,8 +21,8 @@ from custom_msgs.msg import DetectedSurfaces, DetectedObjects
 # =========================
 
 # Fixed cup pose (in base_link)
-CUP_X = 0.298 #0.318
-CUP_Y = 0.330 # 0.350
+CUP_X = 0.299 #0.318
+CUP_Y = 0.331 # 0.350
 CUP_Z = 0.035 # as is
 CUP_FRAME_PARENT = "base_link"
 CUP_FRAME_CHILD  = "cup"

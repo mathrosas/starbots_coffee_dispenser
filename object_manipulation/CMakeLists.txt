@@ -37,7 +37,8 @@ ament_target_dependencies(object_manipulation
     interactive_markers
     moveit_ros_planning
     control_msgs
-	custom_msgs)
+	custom_msgs
+    moveit_msgs)
 
 install(TARGETS object_manipulation add_coffee_scene
   DESTINATION lib/${PROJECT_NAME}
