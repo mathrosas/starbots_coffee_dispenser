@@ -2,13 +2,6 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 
 def generate_launch_description():
-    pointcloud_filter = Node(
-        package='pointcloud_filter',
-        executable='pointcloud_filter',
-        name='pointcloud_filter',
-        output='screen'
-    )
-
     object_detection = Node(
         package='object_detection',
         executable='object_detection',
@@ -17,4 +10,4 @@ def generate_launch_description():
         arguments=["--ros-args", "--log-level", "info"]
     )
 
-    return LaunchDescription([pointcloud_filter, object_detection])
+    return LaunchDescription([object_detection])

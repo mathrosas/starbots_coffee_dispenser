@@ -296,7 +296,7 @@ public:
     // 9. approach down to cupholder center
     RCLCPP_INFO(LOGGER, "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
                 place_x, place_y, place_z);
-    setup_waypoints_target(+0.000, +0.000, -PREGRASP_Z_OFFSET);
+    setup_waypoints_target(+0.000, +0.000, -0.10);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
       return;
