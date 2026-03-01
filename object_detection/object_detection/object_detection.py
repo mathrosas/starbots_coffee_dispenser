@@ -86,12 +86,21 @@ class ObjectDetection(Node):
         self.declare_parameter("holder_match_max_dist", 0.08)
         self.declare_parameter("log_ordered_holders", False)
         self.declare_parameter("holder_tf_stable_frames", 3)
+        self.declare_parameter("holder_smoothing_alpha", 0.25)
+        self.declare_parameter("holder_max_jump", 0.03)
+        self.declare_parameter("holder_min_separation", 0.05)
+        self.declare_parameter("holder_hold_missing_frames", 20)
 
         # OpenCV detector params
         self.declare_parameter("opencv_map_resolution", 0.003)       # m/px
         self.declare_parameter("opencv_blur_ksize", 7)               # odd
         self.declare_parameter("opencv_morph_kernel_px", 3)
         self.declare_parameter("opencv_min_contour_area_px", 80.0)
+        self.declare_parameter("opencv_expected_holes", 4)
+        self.declare_parameter("opencv_use_hough", True)
+        self.declare_parameter("opencv_hough_dp", 1.2)
+        self.declare_parameter("opencv_hough_param1", 80.0)
+        self.declare_parameter("opencv_hough_param2", 10.0)
         self.declare_parameter("pointcloud_topic", "/wrist_rgbd_depth_sensor/points")
 
         pointcloud_topic = str(self.get_parameter("pointcloud_topic").value)
@@ -124,6 +133,9 @@ class ObjectDetection(Node):
         self.pending_holder_centroids: List[List[float]] = []
         self.pending_holder_confirmations = 0
         self.waiting_for_tf_logged = False
+        self.tracked_holder_centroids: List[List[float]] = []
+        self.tracked_holder_dims: List[List[float]] = []
+        self.tracked_holder_missing_counts: List[int] = []
 
         self.publish_static_cup_tf()
         self.get_logger().info(
@@ -162,6 +174,9 @@ class ObjectDetection(Node):
 
             # Keep stable IDs ch_1..ch_n frame to frame
             ch_centroids, ch_dims = self.stable_order_holders(
+                ch_centroids, ch_dims, tray_center
+            )
+            ch_centroids, ch_dims = self.stabilize_holders(
                 ch_centroids, ch_dims, tray_center
             )
 
@@ -391,11 +406,12 @@ class ObjectDetection(Node):
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
         bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, kernel)
 
-        contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(bw, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         min_area_px = float(self.get_parameter("opencv_min_contour_area_px").value)
 
         accepted_c: List[List[float]] = []
         accepted_d: List[List[float]] = []
+        accepted_support: List[int] = []
 
         for cnt in contours:
             area = float(cv2.contourArea(cnt))
@@ -410,36 +426,135 @@ class ObjectDetection(Node):
             cx = x_min + float(cx_px) * res
             cy = y_min + float(cy_px) * res
 
-            radial = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
-            local = pts[radial <= max(radius, 0.015)]
-            if local.shape[0] < 8:
+            evaluated = self._evaluate_candidate(
+                cx=cx,
+                cy=cy,
+                radius=radius,
+                candidate_points=pts,
+                reference_points=reference_points,
+                tray_z=float(tray_center[2]),
+            )
+            if evaluated is None:
                 continue
+            center_xyz, dim_xyz, support = evaluated
+            self._append_or_replace_candidate(
+                center_xyz=center_xyz,
+                dim_xyz=dim_xyz,
+                support=support,
+                accepted_c=accepted_c,
+                accepted_d=accepted_d,
+                accepted_support=accepted_support,
+            )
 
-            cz = float(np.median(local[:, 2]))
-            z05 = float(np.percentile(local[:, 2], 5))
-            z95 = float(np.percentile(local[:, 2], 95))
-            h = float(np.clip(z95 - z05, CUP_MIN_HEIGHT, CUP_MAX_HEIGHT))
+        # Hough fallback helps split merged blobs and recover missing holes.
+        if bool(self.get_parameter("opencv_use_hough").value):
+            min_r_px = max(3, int(round((CUP_MIN_RADIUS / res) * 0.8)))
+            max_r_px = max(min_r_px + 1, int(round((CUP_MAX_RADIUS / res) * 1.2)))
+            min_dist_px = max(6, int(round((MIN_CENTROID_DISTANCE / res) * 0.8)))
+            circles = cv2.HoughCircles(
+                img,
+                cv2.HOUGH_GRADIENT,
+                dp=float(self.get_parameter("opencv_hough_dp").value),
+                minDist=float(min_dist_px),
+                param1=float(self.get_parameter("opencv_hough_param1").value),
+                param2=float(self.get_parameter("opencv_hough_param2").value),
+                minRadius=min_r_px,
+                maxRadius=max_r_px,
+            )
+            if circles is not None:
+                for c in np.asarray(circles[0], dtype=np.float32):
+                    cx_px, cy_px, r_px = float(c[0]), float(c[1]), float(c[2])
+                    cx = x_min + cx_px * res
+                    cy = y_min + cy_px * res
+                    radius = float(r_px) * res
+                    evaluated = self._evaluate_candidate(
+                        cx=cx,
+                        cy=cy,
+                        radius=radius,
+                        candidate_points=pts,
+                        reference_points=reference_points,
+                        tray_z=float(tray_center[2]),
+                    )
+                    if evaluated is None:
+                        continue
+                    center_xyz, dim_xyz, support = evaluated
+                    self._append_or_replace_candidate(
+                        center_xyz=center_xyz,
+                        dim_xyz=dim_xyz,
+                        support=support,
+                        accepted_c=accepted_c,
+                        accepted_d=accepted_d,
+                        accepted_support=accepted_support,
+                    )
 
-            center = np.asarray([cx, cy, cz], dtype=float)
-            if self.is_holder_occupied(center, radius, reference_points):
-                continue
-
-            if any(np.linalg.norm(center - np.asarray(k, dtype=float)) < MIN_CENTROID_DISTANCE
-                   for k in accepted_c):
-                continue
-
-            diameter = radius * 2.0
-            accepted_c.append([float(cx), float(cy), float(cz)])
-            accepted_d.append([diameter, diameter, h])
+        # Keep strongest N detections (default 4 holes).
+        expected = max(1, int(self.get_parameter("opencv_expected_holes").value))
+        if accepted_c:
+            order = np.argsort(np.asarray(accepted_support))[::-1]
+            accepted_c = [accepted_c[i] for i in order]
+            accepted_d = [accepted_d[i] for i in order]
+            if len(accepted_c) > expected:
+                accepted_c = accepted_c[:expected]
+                accepted_d = accepted_d[:expected]
 
         return accepted_c, accepted_d
 
-    def is_holder_occupied(self, center_xyz: np.ndarray, radius: float, reference_points: np.ndarray) -> bool:
+    def _evaluate_candidate(self,
+                            cx: float,
+                            cy: float,
+                            radius: float,
+                            candidate_points: np.ndarray,
+                            reference_points: np.ndarray,
+                            tray_z: float) -> Tuple[np.ndarray, List[float], int] | None:
+        radial = np.hypot(candidate_points[:, 0] - cx, candidate_points[:, 1] - cy)
+        local = candidate_points[radial <= max(radius, 0.015)]
+        support = int(local.shape[0])
+        if support < 8:
+            return None
+
+        cz = float(np.median(local[:, 2]))
+        z05 = float(np.percentile(local[:, 2], 5))
+        z95 = float(np.percentile(local[:, 2], 95))
+        h = float(np.clip(z95 - z05, CUP_MIN_HEIGHT, CUP_MAX_HEIGHT))
+        center = np.asarray([cx, cy, cz], dtype=float)
+        if self.is_holder_occupied(center, radius, reference_points, tray_z):
+            return None
+
+        diameter = float(radius * 2.0)
+        return center, [diameter, diameter, h], support
+
+    def _append_or_replace_candidate(self,
+                                     center_xyz: np.ndarray,
+                                     dim_xyz: List[float],
+                                     support: int,
+                                     accepted_c: List[List[float]],
+                                     accepted_d: List[List[float]],
+                                     accepted_support: List[int]) -> None:
+        for i, prev in enumerate(accepted_c):
+            if np.linalg.norm(center_xyz - np.asarray(prev, dtype=float)) < MIN_CENTROID_DISTANCE:
+                if support > accepted_support[i]:
+                    accepted_c[i] = [float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])]
+                    accepted_d[i] = dim_xyz
+                    accepted_support[i] = support
+                return
+
+        accepted_c.append([float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])])
+        accepted_d.append(dim_xyz)
+        accepted_support.append(support)
+
+    def is_holder_occupied(self,
+                           center_xyz: np.ndarray,
+                           radius: float,
+                           reference_points: np.ndarray,
+                           tray_z: float | None = None) -> bool:
         if reference_points.shape[0] == 0:
             return False
 
         cx, cy, cz = float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])
         z_thr = cz + OCCUPANCY_Z_MARGIN
+        # Guard against false "occupied" from tray surface itself.
+        if tray_z is not None:
+            z_thr = max(z_thr, float(tray_z) + 0.02)
         radial = np.hypot(reference_points[:, 0] - cx, reference_points[:, 1] - cy)
         hits = np.sum((reference_points[:, 2] > z_thr) & (radial <= (radius + 0.01)))
         return bool(hits >= OCCUPANCY_PTS_THRESH)
@@ -502,6 +617,134 @@ class ObjectDetection(Node):
                 ordered_pairs.append(pair)
 
         return [p[0] for p in ordered_pairs], [p[1] for p in ordered_pairs]
+
+    def stabilize_holders(self,
+                          centroids: List[List[float]],
+                          dims: List[List[float]],
+                          tray_center: List[float]) -> Tuple[List[List[float]], List[List[float]]]:
+        expected = max(1, int(self.get_parameter("opencv_expected_holes").value))
+        alpha = float(np.clip(float(self.get_parameter("holder_smoothing_alpha").value), 0.01, 1.0))
+        max_jump = max(0.001, float(self.get_parameter("holder_max_jump").value))
+        min_sep = max(0.0, float(self.get_parameter("holder_min_separation").value))
+        hold_missing = max(0, int(self.get_parameter("holder_hold_missing_frames").value))
+        match_max = float(self.get_parameter("holder_match_max_dist").value)
+
+        if not centroids and not self.tracked_holder_centroids:
+            return [], []
+
+        # First-time initialization with currently visible holders.
+        if not self.tracked_holder_centroids and centroids:
+            init_n = min(len(centroids), expected)
+            self.tracked_holder_centroids = [centroids[i][:] for i in range(init_n)]
+            self.tracked_holder_dims = [dims[i][:] for i in range(init_n)]
+            self.tracked_holder_missing_counts = [0 for _ in range(init_n)]
+
+        prev = [np.asarray(c, dtype=float) for c in self.tracked_holder_centroids]
+        prev_dims = [np.asarray(d, dtype=float) for d in self.tracked_holder_dims]
+        det = [np.asarray(c, dtype=float) for c in centroids]
+        det_dims = [np.asarray(d, dtype=float) for d in dims]
+
+        # Grow track list up to expected count when new detections appear.
+        while len(prev) < expected and len(det) > len(prev):
+            idx = len(prev)
+            prev.append(det[idx].copy())
+            prev_dims.append(det_dims[idx].copy())
+            self.tracked_holder_missing_counts.append(0)
+
+        n_tracks = len(prev)
+        if len(self.tracked_holder_missing_counts) < n_tracks:
+            self.tracked_holder_missing_counts += [0] * (n_tracks - len(self.tracked_holder_missing_counts))
+
+        used = set()
+        new_centroids: List[np.ndarray] = []
+        new_dims: List[np.ndarray] = []
+        new_missing = self.tracked_holder_missing_counts[:n_tracks]
+
+        for i in range(n_tracks):
+            p = prev[i]
+            best_j = -1
+            best_d = float("inf")
+            for j, c_now in enumerate(det):
+                if j in used:
+                    continue
+                d = float(np.linalg.norm(c_now - p))
+                if d < best_d:
+                    best_d = d
+                    best_j = j
+
+            if best_j >= 0 and best_d <= match_max:
+                used.add(best_j)
+                meas = det[best_j]
+                delta = meas - p
+                dist = float(np.linalg.norm(delta))
+                # Clamp abrupt frame jumps to avoid marker/TF teleporting.
+                if dist > max_jump and dist > 1e-9:
+                    meas = p + (delta / dist) * max_jump
+                filt = (1.0 - alpha) * p + alpha * meas
+
+                if i < len(prev_dims) and best_j < len(det_dims):
+                    dim_f = (1.0 - alpha) * prev_dims[i] + alpha * det_dims[best_j]
+                elif i < len(prev_dims):
+                    dim_f = prev_dims[i]
+                else:
+                    dim_f = np.asarray([2.0 * CUP_MIN_RADIUS, 2.0 * CUP_MIN_RADIUS, CUP_MIN_HEIGHT], dtype=float)
+
+                new_centroids.append(filt)
+                new_dims.append(dim_f)
+                new_missing[i] = 0
+            else:
+                # Hold last pose for a while if a detection disappears.
+                new_centroids.append(p.copy())
+                new_dims.append(prev_dims[i] if i < len(prev_dims) else np.asarray(
+                    [2.0 * CUP_MIN_RADIUS, 2.0 * CUP_MIN_RADIUS, CUP_MIN_HEIGHT], dtype=float
+                ))
+                new_missing[i] = new_missing[i] + 1
+
+        # Drop stale tracks only if we have more tracks than expected.
+        if len(new_centroids) > expected:
+            keep_idx = []
+            for i, miss in enumerate(new_missing):
+                if miss <= hold_missing:
+                    keep_idx.append(i)
+            if len(keep_idx) < expected:
+                keep_idx = list(range(expected))
+            new_centroids = [new_centroids[i] for i in keep_idx[:expected]]
+            new_dims = [new_dims[i] for i in keep_idx[:expected]]
+            new_missing = [new_missing[i] for i in keep_idx[:expected]]
+
+        # Prevent overlapping holders by pushing pairs apart minimally.
+        if min_sep > 1e-6 and len(new_centroids) > 1:
+            for _ in range(2):
+                for i in range(len(new_centroids)):
+                    for j in range(i + 1, len(new_centroids)):
+                        v = new_centroids[j] - new_centroids[i]
+                        d = float(np.linalg.norm(v))
+                        if d >= min_sep:
+                            continue
+                        if d < 1e-9:
+                            v = np.asarray([1.0, 0.0, 0.0], dtype=float)
+                            d = 1.0
+                        push = 0.5 * (min_sep - d)
+                        u = v / d
+                        new_centroids[i] = new_centroids[i] - push * u
+                        new_centroids[j] = new_centroids[j] + push * u
+
+        # Keep tracks around tray radius limit.
+        tray_xy = np.asarray(tray_center[:2], dtype=float)
+        for i in range(len(new_centroids)):
+            delta_xy = new_centroids[i][:2] - tray_xy
+            r = float(np.linalg.norm(delta_xy))
+            if r > TRAY_RADIUS_CAP and r > 1e-9:
+                new_centroids[i][:2] = tray_xy + (delta_xy / r) * TRAY_RADIUS_CAP
+
+        self.tracked_holder_centroids = [
+            [float(c[0]), float(c[1]), float(c[2])] for c in new_centroids
+        ]
+        self.tracked_holder_dims = [
+            [float(d[0]), float(d[1]), float(d[2])] for d in new_dims
+        ]
+        self.tracked_holder_missing_counts = new_missing
+        return self.tracked_holder_centroids, self.tracked_holder_dims
 
     # --------- Publishing ---------
     def publish_tray(self, centroids: List[List[float]], dims: List[List[float]]) -> None:
