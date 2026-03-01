@@ -34,8 +34,8 @@ static constexpr double APPROACH_Z_DELTA = -0.12; // straight down 8.5 cm
 static constexpr double RETREAT_Z_DELTA = +0.30;  // straight up 8.5 cm
 
 // project defaults for fixed-cup mode
-static constexpr double FIXED_CUP_X = 0.299;
-static constexpr double FIXED_CUP_Y = 0.331;
+static constexpr double FIXED_CUP_X = 0.300;
+static constexpr double FIXED_CUP_Y = 0.330;
 static constexpr double FIXED_CUP_Z = 0.035;
 
 class PickAndPlacePerception {
