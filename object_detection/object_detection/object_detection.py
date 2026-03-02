@@ -19,8 +19,8 @@ from custom_msgs.msg import DetectedObjects, DetectedSurfaces
 # =========================
 
 # Fixed cup pose (in base_link)
-CUP_X = 0.300
-CUP_Y = 0.330
+CUP_X = 0.296 # 0.300
+CUP_Y = 0.334 # 0.330
 CUP_Z = 0.035
 CUP_FRAME_PARENT = "base_link"
 CUP_FRAME_CHILD = "cup"
@@ -80,9 +80,9 @@ class ObjectDetection(Node):
         super().__init__("object_detection_node")
 
         # Runtime tuning (kept for compatibility)
-        self.declare_parameter("holder_offset_x", -0.001)
-        self.declare_parameter("holder_offset_y", +0.001)
-        self.declare_parameter("holder_offset_z", 0.0)
+        self.declare_parameter("holder_offset_x", 0.00)
+        self.declare_parameter("holder_offset_y", 0.00)
+        self.declare_parameter("holder_offset_z", 0.00)
         self.declare_parameter("holder_match_max_dist", 0.08)
         self.declare_parameter("log_ordered_holders", False)
         self.declare_parameter("holder_tf_stable_frames", 3)

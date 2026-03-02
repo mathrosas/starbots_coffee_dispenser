@@ -33,9 +33,9 @@ static constexpr double PREGRASP_Z_OFFSET = 0.30; // 20 cm above detected object
 static constexpr double APPROACH_Z_DELTA = -0.12; // straight down 8.5 cm
 static constexpr double RETREAT_Z_DELTA = +0.30;  // straight up 8.5 cm
 
-// project defaults for fixed-cup mode
-static constexpr double FIXED_CUP_X = 0.300;
-static constexpr double FIXED_CUP_Y = 0.330;
+// project defaults for fixed-cup mode [0.260, 0.370, -0.007]
+static constexpr double FIXED_CUP_X = 0.296; // 0.300
+static constexpr double FIXED_CUP_Y = 0.334; // 0.330
 static constexpr double FIXED_CUP_Z = 0.035;
 
 class PickAndPlacePerception {
@@ -82,9 +82,9 @@ public:
         move_group_node_, PLANNING_GROUP_GRIPPER);
 
     move_group_robot_->setPoseReferenceFrame(REF_FRAME);
-    move_group_robot_->setPlanningTime(8.0);
+    move_group_robot_->setPlanningTime(10.0);
     move_group_robot_->setNumPlanningAttempts(20);
-    move_group_robot_->setGoalPositionTolerance(0.001);
+    move_group_robot_->setGoalPositionTolerance(0.0005);
     move_group_robot_->setGoalOrientationTolerance(0.05);
     move_group_robot_->setMaxVelocityScalingFactor(0.3);
     move_group_robot_->setMaxAccelerationScalingFactor(0.3);
@@ -175,6 +175,10 @@ public:
                 holder.object_id, holder.position.x, holder.position.y,
                 holder.position.z, holder.width, holder.height,
                 holder.thickness);
+    RCLCPP_INFO(LOGGER,
+                "[PLACE_DIAG] Target cupholder id=%u pose=(%.4f, %.4f, %.4f)",
+                holder.object_id, holder.position.x, holder.position.y,
+                holder.position.z);
 
     const double cup_x = move_group_node_->get_parameter("cup_x").as_double();
     const double cup_y = move_group_node_->get_parameter("cup_y").as_double();
@@ -226,6 +230,7 @@ public:
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // 4. close the gripper
+    log_xy_error_to_point("before_grasp_close", cup_x, cup_y, cup_z);
     RCLCPP_INFO(LOGGER, "Closing Gripper...");
     setup_named_pose_gripper("close");
     plan_trajectory_gripper();
@@ -267,10 +272,9 @@ public:
 
     // 7. go to pre-place position (from detected cupholder)
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z + 2*PREGRASP_Z_OFFSET);
-    setup_goal_pose_target(place_x, place_y,
-                           place_z + 2*PREGRASP_Z_OFFSET, -1.000,
-                           +0.000, +0.000, +0.000);
+                place_x, place_y, place_z + 2 * PREGRASP_Z_OFFSET);
+    setup_goal_pose_target(place_x, place_y, place_z + 2 * PREGRASP_Z_OFFSET,
+                           -1.000, +0.000, +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
       return;
@@ -280,27 +284,30 @@ public:
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // 8. go to lower pre-place position (from detected cupholder)
-    RCLCPP_INFO(LOGGER, "Going to Lower Pre-place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z + PREGRASP_Z_OFFSET - 0.02);
-    setup_goal_pose_target(place_x, place_y,
-                           place_z + PREGRASP_Z_OFFSET - 0.02, -1.000,
-                           +0.000, +0.000, +0.000);
-    plan_trajectory_kinematics();
-    if (!execute_trajectory_kinematics()) {
-      return;
-    }
+    // RCLCPP_INFO(LOGGER,
+    //             "Going to Lower Pre-place Position (%.3f, %.3f, %.3f)...",
+    //             place_x, place_y, place_z + PREGRASP_Z_OFFSET - 0.02);
+    // setup_goal_pose_target(place_x, place_y, place_z + PREGRASP_Z_OFFSET,
+    //                        -1.000, +0.000, +0.000, +0.000);
+    // plan_trajectory_kinematics();
+    // if (!execute_trajectory_kinematics()) {
+    //   return;
+    // }
+    // log_xy_error_to_holder("before_insert", place_x, place_y, place_z);
 
     // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    // std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // 9. approach down to cupholder center
-    RCLCPP_INFO(LOGGER, "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
+    RCLCPP_INFO(LOGGER,
+                "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
                 place_x, place_y, place_z);
-    setup_waypoints_target(+0.000, +0.000, -0.10);
+    setup_waypoints_target(+0.000, +0.000, - PREGRASP_Z_OFFSET - 0.05);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
       return;
     }
+    log_xy_error_to_holder("after_insert_cartesian", place_x, place_y, place_z);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
@@ -316,7 +323,20 @@ public:
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
-    // 11. Going to Initial Position
+    // 11. retreat from cupholder center
+    RCLCPP_INFO(LOGGER,
+                "Retreat from Place Position (%.3f, %.3f, %.3f)...",
+                place_x, place_y, place_z);
+    setup_waypoints_target(+0.000, +0.000, PREGRASP_Z_OFFSET);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      return;
+    }
+
+    // wait for few seconds
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 12. Going to Initial Position
     RCLCPP_INFO(LOGGER, "Going to Initial Position...");
     setup_joint_value_target(+0.0000, -1.5708, +0.0000, -1.5708, +0.0000,
                              +0.0000);
@@ -547,6 +567,36 @@ private:
                 tag.c_str(), ee.position.x, ee.position.y, ee.position.z,
                 ee.orientation.x, ee.orientation.y, ee.orientation.z,
                 ee.orientation.w, joint_ss.str().c_str());
+  }
+
+  void log_xy_error_to_holder(const std::string &tag, double holder_x,
+                              double holder_y, double holder_z) {
+    const auto ee = move_group_robot_->getCurrentPose().pose;
+    const double dx = ee.position.x - holder_x;
+    const double dy = ee.position.y - holder_y;
+    const double dz = ee.position.z - holder_z;
+    const double xy_mm = 1000.0 * std::hypot(dx, dy);
+
+    RCLCPP_INFO(LOGGER,
+                "[PLACE_DIAG:%s] holder=(%.4f, %.4f, %.4f) "
+                "ee=(%.4f, %.4f, %.4f) d=(%.4f, %.4f, %.4f) |xy|=%.2f mm",
+                tag.c_str(), holder_x, holder_y, holder_z, ee.position.x,
+                ee.position.y, ee.position.z, dx, dy, dz, xy_mm);
+  }
+
+  void log_xy_error_to_point(const std::string &tag, double target_x,
+                             double target_y, double target_z) {
+    const auto ee = move_group_robot_->getCurrentPose().pose;
+    const double dx = ee.position.x - target_x;
+    const double dy = ee.position.y - target_y;
+    const double dz = ee.position.z - target_z;
+    const double xy_mm = 1000.0 * std::hypot(dx, dy);
+
+    RCLCPP_INFO(LOGGER,
+                "[PICK_DIAG:%s] target=(%.4f, %.4f, %.4f) "
+                "ee=(%.4f, %.4f, %.4f) d=(%.4f, %.4f, %.4f) |xy|=%.2f mm",
+                tag.c_str(), target_x, target_y, target_z, ee.position.x,
+                ee.position.y, ee.position.z, dx, dy, dz, xy_mm);
   }
 }; // class PickAndPlacePerception
 
