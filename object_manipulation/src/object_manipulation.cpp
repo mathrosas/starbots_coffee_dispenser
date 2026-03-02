@@ -27,15 +27,17 @@ static const std::string PLANNING_GROUP_ROBOT = "ur_manipulator";
 static const std::string PLANNING_GROUP_GRIPPER = "gripper";
 static const std::string REF_FRAME = "base_link";
 static const std::string CUPHOLDER_TOPIC = "/cup_holder_detected";
+static const std::string OMPL_PIPELINE = "ompl";
+static const std::string PILZ_PIPELINE = "pilz_industrial_motion_planner";
+static const std::string PILZ_LIN = "LIN";
 
 // offsets / “magic numbers”:
-static constexpr double PREGRASP_Z_OFFSET = 0.30; // 20 cm above detected object
-static constexpr double APPROACH_Z_DELTA = -0.12; // straight down 8.5 cm
-static constexpr double RETREAT_Z_DELTA = +0.30;  // straight up 8.5 cm
+static constexpr double PREGRASP_Z_OFFSET = 0.20; // 20 cm above detected object
+static constexpr double APPROACH_Z_DELTA = 0.01;  // straight down 8.5 cm
 
 // project defaults for fixed-cup mode [0.260, 0.370, -0.007]
-static constexpr double FIXED_CUP_X = 0.296; // 0.300
-static constexpr double FIXED_CUP_Y = 0.334; // 0.330
+static constexpr double FIXED_CUP_X = 0.299; // 0.300
+static constexpr double FIXED_CUP_Y = 0.331; // 0.330
 static constexpr double FIXED_CUP_Z = 0.035;
 
 class PickAndPlacePerception {
@@ -86,8 +88,10 @@ public:
     move_group_robot_->setNumPlanningAttempts(20);
     move_group_robot_->setGoalPositionTolerance(0.0005);
     move_group_robot_->setGoalOrientationTolerance(0.05);
-    move_group_robot_->setMaxVelocityScalingFactor(0.3);
-    move_group_robot_->setMaxAccelerationScalingFactor(0.3);
+    move_group_robot_->setMaxVelocityScalingFactor(0.2);
+    move_group_robot_->setMaxAccelerationScalingFactor(0.1);
+    // move_group_robot_->setMaxVelocityScalingFactor(0.08);
+    // move_group_robot_->setMaxAccelerationScalingFactor(0.03);
 
     move_group_gripper_->setGoalTolerance(0.0001);
     move_group_gripper_->setMaxVelocityScalingFactor(
@@ -220,7 +224,7 @@ public:
 
     // 3. approach straight down
     RCLCPP_INFO(LOGGER, "Approaching object...");
-    setup_waypoints_target(+0.000, +0.000, APPROACH_Z_DELTA);
+    setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
       return;
@@ -243,7 +247,7 @@ public:
 
     // 5. retreat
     RCLCPP_INFO(LOGGER, "Retreating...");
-    setup_waypoints_target(+0.000, +0.000, RETREAT_Z_DELTA);
+    setup_waypoints_target(+0.000, +0.000, 4 * APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
       return;
@@ -272,8 +276,8 @@ public:
 
     // 7. go to pre-place position (from detected cupholder)
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z + 2 * PREGRASP_Z_OFFSET);
-    setup_goal_pose_target(place_x, place_y, place_z + 2 * PREGRASP_Z_OFFSET,
+                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.09);
+    setup_goal_pose_target(place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.09,
                            -1.000, +0.000, +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
@@ -301,8 +305,9 @@ public:
     // 9. approach down to cupholder center
     RCLCPP_INFO(LOGGER,
                 "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z);
-    setup_waypoints_target(+0.000, +0.000, - PREGRASP_Z_OFFSET - 0.05);
+                place_x, place_y,
+                place_z + PREGRASP_Z_OFFSET + 0.10 - (APPROACH_Z_DELTA));
+    setup_waypoints_target(+0.000, +0.000, -(APPROACH_Z_DELTA));
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
       return;
@@ -324,19 +329,32 @@ public:
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // 11. retreat from cupholder center
+    // RCLCPP_INFO(LOGGER, "Retreat from Place Position (%.3f, %.3f, %.3f)...",
+    //             place_x, place_y, place_z);
+    // setup_waypoints_target(+0.000, +0.000, (APPROACH_Z_DELTA / 2));
+    // plan_trajectory_cartesian();
+    // if (!execute_trajectory_cartesian()) {
+    //   return;
+    // }
+
+    // wait for few seconds
+    // std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    // 12. go to pre-place position again (from detected cupholder)
     RCLCPP_INFO(LOGGER,
-                "Retreat from Place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z);
-    setup_waypoints_target(+0.000, +0.000, PREGRASP_Z_OFFSET);
-    plan_trajectory_cartesian();
-    if (!execute_trajectory_cartesian()) {
+                "Going to Pre-place Position Again (%.3f, %.3f, %.3f)...",
+                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.09);
+    setup_goal_pose_target(place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.09,
+                           -1.000, +0.000, +0.000, +0.000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
       return;
     }
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
-    // 12. Going to Initial Position
+    // 13. Going to Initial Position
     RCLCPP_INFO(LOGGER, "Going to Initial Position...");
     setup_joint_value_target(+0.0000, -1.5708, +0.0000, -1.5708, +0.0000,
                              +0.0000);
@@ -379,11 +397,8 @@ private:
   Plan gripper_trajectory_plan_;
   bool plan_success_gripper_{false};
 
-  std::vector<Pose> cartesian_waypoints_;
-  RobotTrajectory cartesian_trajectory_plan_;
-  const double jump_threshold_{0.0};
-  const double end_effector_step_{0.01};
-  double plan_fraction_robot_{0.0};
+  Plan cartesian_lin_plan_;
+  bool plan_success_cartesian_{false};
 
   int target_holder_id_{1};
   std::shared_ptr<std::promise<DetectedObject>> cupholder_promise_;
@@ -445,6 +460,8 @@ private:
   void setup_goal_pose_target(float pos_x, float pos_y, float pos_z,
                               float quat_x, float quat_y, float quat_z,
                               float quat_w) {
+    // OMPL goals are provided in perception/base coordinates.
+    move_group_robot_->setPoseReferenceFrame(REF_FRAME);
     target_pose_robot_.position.x = pos_x;
     target_pose_robot_.position.y = pos_y;
     target_pose_robot_.position.z = pos_z;
@@ -457,6 +474,8 @@ private:
   }
 
   void plan_trajectory_kinematics() {
+    move_group_robot_->setPlanningPipelineId(OMPL_PIPELINE);
+    move_group_robot_->setPlannerId("RRTConnectkConfigDefault");
     plan_success_robot_ =
         (move_group_robot_->plan(kinematics_trajectory_plan_) ==
          moveit::core::MoveItErrorCode::SUCCESS);
@@ -479,38 +498,40 @@ private:
   }
 
   void setup_waypoints_target(float x_delta, float y_delta, float z_delta) {
-    cartesian_waypoints_.clear();
+    // Pilz LIN requires goal frame == model/planning frame (typically "world").
+    move_group_robot_->setPoseReferenceFrame(
+        move_group_robot_->getPlanningFrame());
     target_pose_robot_ = move_group_robot_->getCurrentPose().pose;
-    cartesian_waypoints_.push_back(target_pose_robot_);
     target_pose_robot_.position.x += x_delta;
     target_pose_robot_.position.y += y_delta;
     target_pose_robot_.position.z += z_delta;
-    cartesian_waypoints_.push_back(target_pose_robot_);
+    move_group_robot_->setStartStateToCurrentState();
+    move_group_robot_->setPoseTarget(target_pose_robot_);
   }
 
   void plan_trajectory_cartesian() {
-    plan_fraction_robot_ = move_group_robot_->computeCartesianPath(
-        cartesian_waypoints_, end_effector_step_, jump_threshold_,
-        cartesian_trajectory_plan_);
+    // Use Pilz LIN for deterministic straight-line TCP moves.
+    move_group_robot_->setPoseReferenceFrame(
+        move_group_robot_->getPlanningFrame());
+    move_group_robot_->setPlanningPipelineId(PILZ_PIPELINE);
+    move_group_robot_->setPlannerId(PILZ_LIN);
+    plan_success_cartesian_ = (move_group_robot_->plan(cartesian_lin_plan_) ==
+                               moveit::core::MoveItErrorCode::SUCCESS);
   }
 
   bool execute_trajectory_cartesian() {
-    // keep the original template behavior: execute for any non-negative
-    // fraction
-    if (plan_fraction_robot_ >= 0.0) {
+    if (plan_success_cartesian_) {
       log_ee_and_joints("pre_execute_cartesian");
-      auto code = move_group_robot_->execute(cartesian_trajectory_plan_);
+      auto code = move_group_robot_->execute(cartesian_lin_plan_);
       if (code != moveit::core::MoveItErrorCode::SUCCESS) {
-        RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Execute Failed !");
+        RCLCPP_ERROR(LOGGER, "Robot LIN Trajectory Execute Failed !");
         return false;
       }
-      RCLCPP_INFO(LOGGER,
-                  "Robot Cartesian Trajectory Success ! (fraction=%.2f)",
-                  plan_fraction_robot_);
+      RCLCPP_INFO(LOGGER, "Robot LIN Trajectory Success !");
       log_ee_and_joints("post_execute_cartesian");
       return true;
     }
-    RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Failed !");
+    RCLCPP_ERROR(LOGGER, "Robot LIN Trajectory Planning Failed !");
     return false;
   }
 
