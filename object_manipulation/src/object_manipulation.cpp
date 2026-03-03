@@ -88,15 +88,18 @@ public:
     move_group_robot_->setNumPlanningAttempts(20);
     move_group_robot_->setGoalPositionTolerance(0.0005);
     move_group_robot_->setGoalOrientationTolerance(0.05);
-    move_group_robot_->setMaxVelocityScalingFactor(0.2);
-    move_group_robot_->setMaxAccelerationScalingFactor(0.1);
+    move_group_robot_->setMaxVelocityScalingFactor(0.1);
+    move_group_robot_->setMaxAccelerationScalingFactor(0.05);
     // move_group_robot_->setMaxVelocityScalingFactor(0.08);
     // move_group_robot_->setMaxAccelerationScalingFactor(0.03);
 
     move_group_gripper_->setGoalTolerance(0.0001);
     move_group_gripper_->setMaxVelocityScalingFactor(
-        0.01); // Slow for precise/less jittery close
-    move_group_gripper_->setMaxAccelerationScalingFactor(0.01);
+        0.1); // Slow for precise/less jittery close
+    move_group_gripper_->setMaxAccelerationScalingFactor(0.05);
+    // move_group_gripper_->setMaxVelocityScalingFactor(
+    //     0.01); // Slow for precise/less jittery close
+    // move_group_gripper_->setMaxAccelerationScalingFactor(0.01);
 
     move_group_robot_->startStateMonitor();
     move_group_gripper_->startStateMonitor();
@@ -191,7 +194,7 @@ public:
     const double pre_x = cup_x;
     const double pre_y = cup_y;
     const double pre_z = cup_z + PREGRASP_Z_OFFSET;
-    const double place_x = holder.position.x;
+    const double place_x = holder.position.x - 0.005;
     const double place_y = holder.position.y;
     const double place_z = holder.position.z;
 
@@ -276,9 +279,10 @@ public:
 
     // 7. go to pre-place position (from detected cupholder)
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.09);
-    setup_goal_pose_target(place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.09,
-                           -1.000, +0.000, +0.000, +0.000);
+                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.075);
+    setup_goal_pose_target(place_x, place_y,
+                           place_z + PREGRASP_Z_OFFSET + 0.075, -1.000, +0.000,
+                           +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
       return;
@@ -287,27 +291,12 @@ public:
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
-    // 8. go to lower pre-place position (from detected cupholder)
-    // RCLCPP_INFO(LOGGER,
-    //             "Going to Lower Pre-place Position (%.3f, %.3f, %.3f)...",
-    //             place_x, place_y, place_z + PREGRASP_Z_OFFSET - 0.02);
-    // setup_goal_pose_target(place_x, place_y, place_z + PREGRASP_Z_OFFSET,
-    //                        -1.000, +0.000, +0.000, +0.000);
-    // plan_trajectory_kinematics();
-    // if (!execute_trajectory_kinematics()) {
-    //   return;
-    // }
-    // log_xy_error_to_holder("before_insert", place_x, place_y, place_z);
-
-    // wait for few seconds
-    // std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-
     // 9. approach down to cupholder center
     RCLCPP_INFO(LOGGER,
                 "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
                 place_x, place_y,
-                place_z + PREGRASP_Z_OFFSET + 0.10 - (APPROACH_Z_DELTA));
-    setup_waypoints_target(+0.000, +0.000, -(APPROACH_Z_DELTA));
+                place_z + PREGRASP_Z_OFFSET + 0.075 - APPROACH_Z_DELTA);
+    setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
       return;
@@ -329,22 +318,10 @@ public:
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // 11. retreat from cupholder center
-    // RCLCPP_INFO(LOGGER, "Retreat from Place Position (%.3f, %.3f, %.3f)...",
-    //             place_x, place_y, place_z);
-    // setup_waypoints_target(+0.000, +0.000, (APPROACH_Z_DELTA / 2));
-    // plan_trajectory_cartesian();
-    // if (!execute_trajectory_cartesian()) {
-    //   return;
-    // }
-
-    // wait for few seconds
-    // std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-
-    // 12. go to pre-place position again (from detected cupholder)
     RCLCPP_INFO(LOGGER,
                 "Going to Pre-place Position Again (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.09);
-    setup_goal_pose_target(place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.09,
+                place_x, place_y, place_z + 3 * PREGRASP_Z_OFFSET);
+    setup_goal_pose_target(place_x, place_y, place_z + 3 * PREGRASP_Z_OFFSET,
                            -1.000, +0.000, +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
@@ -354,7 +331,7 @@ public:
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
-    // 13. Going to Initial Position
+    // 12. Going to Initial Position
     RCLCPP_INFO(LOGGER, "Going to Initial Position...");
     setup_joint_value_target(+0.0000, -1.5708, +0.0000, -1.5708, +0.0000,
                              +0.0000);
