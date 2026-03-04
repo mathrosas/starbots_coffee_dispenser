@@ -48,6 +48,15 @@ OCCUPANCY_PTS_THRESH = 20
 # De-duplication
 MIN_CENTROID_DISTANCE = 0.05
 
+# Tray plane / ring refinement
+PLANE_RANSAC_ITERS = 120
+PLANE_INLIER_THRESH = 0.003
+TRAY_TOP_Z_WINDOW = 0.020
+RING_DELTA_MIN = 0.003
+RING_DELTA_RATIO = 0.20
+RING_MIN_POINTS = 10
+RING_RESID_BASE = 0.0015
+
 # Viz
 TRAY_MARKER_HEIGHT = 0.09
 CUP_MARKER_HEIGHT = 0.035
@@ -90,6 +99,7 @@ class ObjectDetection(Node):
         self.declare_parameter("holder_max_jump", 0.03)
         self.declare_parameter("holder_min_separation", 0.00)
         self.declare_parameter("holder_hold_missing_frames", 20)
+        self.declare_parameter("holder_center_plane_offset_z", 0.0)
 
         # OpenCV detector params
         self.declare_parameter("opencv_map_resolution", 0.003)       # m/px
@@ -136,6 +146,7 @@ class ObjectDetection(Node):
         self.tracked_holder_centroids: List[List[float]] = []
         self.tracked_holder_dims: List[List[float]] = []
         self.tracked_holder_missing_counts: List[int] = []
+        self.last_tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
 
         self.publish_static_cup_tf()
         self.get_logger().info(
@@ -155,12 +166,12 @@ class ObjectDetection(Node):
                 self.get_logger().warn("Empty ROI after coarse filter.")
                 return
 
-            tray_center, tray_dim = self.estimate_tray(roi)
+            tray_center, tray_dim, tray_frame = self.estimate_tray(roi)
             if tray_center is None:
                 self.get_logger().warn("Could not estimate tray surface.")
                 return
 
-            band = self.extract_below_tray_band(roi, tray_center)
+            band = self.extract_below_tray_band(roi, tray_center, tray_frame)
             if band.shape[0] == 0:
                 self.get_logger().warn("No points in below-tray band.")
                 self.publish_tray([tray_center], [tray_dim])
@@ -170,6 +181,7 @@ class ObjectDetection(Node):
                 candidate_points=band,
                 reference_points=roi,
                 tray_center=tray_center,
+                tray_frame=tray_frame,
             )
 
             # Keep stable IDs ch_1..ch_n frame to frame
@@ -306,85 +318,267 @@ class ObjectDetection(Node):
         )
         return points[keep]
 
-    def estimate_tray(self, roi: np.ndarray) -> Tuple[List[float], List[float]]:
+    def estimate_tray(
+        self,
+        roi: np.ndarray,
+    ) -> Tuple[
+        List[float] | None,
+        List[float] | None,
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None,
+    ]:
         """
-        Estimate tray center and dimensions from high-z points.
+        Estimate tray center and dimensions from a robust tray plane fit.
         Returns:
           center [x, y, z]
           dims   [diameter, diameter, height]
+          tray frame (p0, u, v, n)
         """
-        if roi.shape[0] < 20:
-            return None, None
+        if roi.shape[0] < 30:
+            return None, None, None
 
         z = roi[:, 2]
-        z_min = float(np.min(z))
-        z_max = float(np.max(z))
-        if z_max - z_min < 1e-4:
-            return None, None
+        z_hi = float(np.percentile(z, 95))
+        top_seed = roi[np.abs(roi[:, 2] - z_hi) <= TRAY_TOP_Z_WINDOW]
+        if top_seed.shape[0] < 30:
+            top_seed = roi
 
-        bin_w = 0.005
-        bins = max(10, int(np.ceil((z_max - z_min) / bin_w)))
-        hist, edges = np.histogram(z, bins=bins, range=(z_min, z_max))
-        peak = int(np.argmax(hist))
-        tray_z = float(0.5 * (edges[peak] + edges[peak + 1]))
+        tray_frame, inlier_top = self._compute_tray_frame_ransac(top_seed)
+        if tray_frame is None or inlier_top.shape[0] < 20:
+            return None, None, None
 
-        # Keep only points around dominant tray-z band
-        band = max(0.006, 1.5 * bin_w)
-        top = roi[(roi[:, 2] >= tray_z - band) & (roi[:, 2] <= tray_z + band)]
-        if top.shape[0] < 10:
-            return None, None
-
-        cx = float(np.median(top[:, 0]))
-        cy = float(np.median(top[:, 1]))
-        cz = tray_z
-
-        radial = np.hypot(top[:, 0] - cx, top[:, 1] - cy)
-        tray_r = float(np.percentile(radial, 90))
+        top_uv = self._project_points_to_tray_uv(inlier_top, tray_frame)
+        center_uv = np.median(top_uv, axis=0)
+        radial_uv = np.linalg.norm(top_uv - center_uv[None, :], axis=1)
+        tray_r = float(np.percentile(radial_uv, 90))
         tray_r = float(np.clip(tray_r, 0.08, TRAY_RADIUS_CAP))
 
-        center = [cx, cy, cz]
+        center_xyz = self._tray_uv_to_world(center_uv, tray_frame)
+        center = [float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])]
         dims = [2.0 * tray_r, 2.0 * tray_r, TRAY_MARKER_HEIGHT]
-        return center, dims
+        return center, dims, tray_frame
 
-    def extract_below_tray_band(self, roi: np.ndarray, tray_center: List[float]) -> np.ndarray:
-        cx, cy, cz = tray_center
-        dz = cz - roi[:, 2]
-        radial = np.hypot(roi[:, 0] - cx, roi[:, 1] - cy)
+    def extract_below_tray_band(
+        self,
+        roi: np.ndarray,
+        tray_center: List[float],
+        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None,
+    ) -> np.ndarray:
+        if tray_frame is None or roi.shape[0] == 0:
+            return np.empty((0, 3), dtype=np.float32)
+
+        p0, u, v, n = tray_frame
+        d = roi - p0
+        uv = np.column_stack((d @ u, d @ v))
+        center_uv = self._project_point_to_tray_uv(np.asarray(tray_center, dtype=float), tray_frame)
+        radial_uv = np.linalg.norm(uv - center_uv[None, :], axis=1)
+        signed_dist = d @ n  # >0 above tray, <0 below tray
+
         keep = (
-            (dz >= Z_GAP_MIN) &
-            (dz <= BELOW_BAND) &
-            (radial <= TRAY_RADIUS_CAP)
+            (signed_dist <= -Z_GAP_MIN)
+            & (signed_dist >= -BELOW_BAND)
+            & (radial_uv <= TRAY_RADIUS_CAP)
         )
         return roi[keep]
+
+    def _compute_tray_frame_ransac(
+        self,
+        points: np.ndarray,
+    ) -> Tuple[
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None,
+        np.ndarray,
+    ]:
+        if points.shape[0] < 30:
+            return None, np.empty((0, 3), dtype=np.float32)
+
+        n_pts = points.shape[0]
+        best_count = 0
+        best_inliers = None
+        rng = np.random.default_rng()
+
+        for _ in range(PLANE_RANSAC_ITERS):
+            idx = rng.choice(n_pts, size=3, replace=False)
+            a, b, c = points[idx[0]], points[idx[1]], points[idx[2]]
+            n = np.cross(b - a, c - a)
+            norm_n = float(np.linalg.norm(n))
+            if norm_n < 1e-9:
+                continue
+            n = n / norm_n
+            if n[2] < 0.0:
+                n = -n
+
+            d = np.abs((points - a) @ n)
+            inliers = d <= PLANE_INLIER_THRESH
+            count = int(np.sum(inliers))
+            if count > best_count:
+                best_count = count
+                best_inliers = inliers
+
+        if best_inliers is None or best_count < 20:
+            return None, np.empty((0, 3), dtype=np.float32)
+
+        inlier_pts = points[best_inliers]
+        p0 = np.mean(inlier_pts, axis=0)
+        centered = inlier_pts - p0
+        cov = np.cov(centered.T)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        n = eigvecs[:, int(np.argmin(eigvals))]
+        n = n / max(1e-9, float(np.linalg.norm(n)))
+        if n[2] < 0.0:
+            n = -n
+
+        ux = np.asarray([1.0, 0.0, 0.0], dtype=float)
+        u = ux - np.dot(ux, n) * n
+        if np.linalg.norm(u) < 1e-6:
+            uy = np.asarray([0.0, 1.0, 0.0], dtype=float)
+            u = uy - np.dot(uy, n) * n
+        u = u / max(1e-9, float(np.linalg.norm(u)))
+        v = np.cross(n, u)
+        v = v / max(1e-9, float(np.linalg.norm(v)))
+
+        # Keep axis orientation consistent frame-to-frame to avoid UV flips.
+        if self.last_tray_frame is not None:
+            _, prev_u, prev_v, prev_n = self.last_tray_frame
+            if float(np.dot(n, prev_n)) < 0.0:
+                n = -n
+                u = -u
+                v = -v
+            if float(np.dot(u, prev_u)) < 0.0:
+                u = -u
+                v = -v
+            if float(np.dot(v, prev_v)) < 0.0:
+                v = -v
+                u = -u
+
+        frame = (
+            np.asarray(p0, dtype=float),
+            np.asarray(u, dtype=float),
+            np.asarray(v, dtype=float),
+            np.asarray(n, dtype=float),
+        )
+        self.last_tray_frame = frame
+        return frame, inlier_pts
+
+    def _project_points_to_tray_uv(
+        self,
+        points: np.ndarray,
+        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    ) -> np.ndarray:
+        p0, u, v, _ = tray_frame
+        d = points - p0
+        return np.column_stack((d @ u, d @ v))
+
+    def _project_point_to_tray_uv(
+        self,
+        point: np.ndarray,
+        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    ) -> np.ndarray:
+        p0, u, v, _ = tray_frame
+        d = point - p0
+        return np.asarray([float(np.dot(d, u)), float(np.dot(d, v))], dtype=float)
+
+    def _tray_uv_to_world(
+        self,
+        uv: np.ndarray,
+        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    ) -> np.ndarray:
+        p0, u, v, _ = tray_frame
+        return p0 + float(uv[0]) * u + float(uv[1]) * v
+
+    def _fit_circle_kasa(
+        self,
+        points_uv: np.ndarray,
+    ) -> Tuple[np.ndarray, float, float, np.ndarray] | None:
+        if points_uv.shape[0] < 3:
+            return None
+
+        x = points_uv[:, 0]
+        y = points_uv[:, 1]
+        a = np.column_stack((2.0 * x, 2.0 * y, np.ones_like(x)))
+        b = x * x + y * y
+        try:
+            sol, _, _, _ = np.linalg.lstsq(a, b, rcond=None)
+        except Exception:
+            return None
+
+        cx, cy, c0 = float(sol[0]), float(sol[1]), float(sol[2])
+        r2 = cx * cx + cy * cy + c0
+        if r2 <= 1e-9:
+            return None
+
+        r = float(np.sqrt(r2))
+        residuals = np.abs(np.hypot(x - cx, y - cy) - r)
+        rmse = float(np.sqrt(np.mean(residuals * residuals)))
+        return np.asarray([cx, cy], dtype=float), r, rmse, residuals
+
+    def _robust_circle_fit(
+        self,
+        ring_uv: np.ndarray,
+        init_center_uv: np.ndarray,
+        init_r: float,
+    ) -> Tuple[np.ndarray, float, float, int]:
+        if ring_uv.shape[0] < RING_MIN_POINTS:
+            return init_center_uv, init_r, float("inf"), 0
+
+        work = ring_uv.copy()
+        best_center = init_center_uv.copy()
+        best_r = float(init_r)
+        best_rmse = float("inf")
+        best_count = int(work.shape[0])
+
+        for _ in range(4):
+            fit = self._fit_circle_kasa(work)
+            if fit is None:
+                break
+            c_uv, r, rmse, residuals = fit
+            best_center, best_r, best_rmse, best_count = c_uv, r, rmse, int(work.shape[0])
+
+            med = float(np.median(residuals))
+            mad = float(np.median(np.abs(residuals - med)))
+            thr = max(RING_RESID_BASE, 2.5 * mad)
+            inliers = residuals <= thr
+            if int(np.sum(inliers)) < RING_MIN_POINTS:
+                break
+
+            new_work = work[inliers]
+            if new_work.shape[0] == work.shape[0]:
+                break
+            work = new_work
+
+        return best_center, best_r, best_rmse, best_count
 
     # --------- OpenCV cup-holder detection ---------
     def detect_cupholders_opencv(self,
                                  candidate_points: np.ndarray,
                                  reference_points: np.ndarray,
-                                 tray_center: List[float]) -> Tuple[List[List[float]], List[List[float]]]:
-        if candidate_points.shape[0] < 25:
+                                 tray_center: List[float],
+                                 tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None
+                                 ) -> Tuple[List[List[float]], List[List[float]]]:
+        if candidate_points.shape[0] < 25 or tray_frame is None:
             return [], []
 
         res = float(self.get_parameter("opencv_map_resolution").value)
+        cand_uv = self._project_points_to_tray_uv(candidate_points, tray_frame)
+        tray_center_uv = self._project_point_to_tray_uv(np.asarray(tray_center, dtype=float), tray_frame)
         half = TRAY_RADIUS_CAP
-        x_min, x_max = tray_center[0] - half, tray_center[0] + half
-        y_min, y_max = tray_center[1] - half, tray_center[1] + half
+        u_min, u_max = tray_center_uv[0] - half, tray_center_uv[0] + half
+        v_min, v_max = tray_center_uv[1] - half, tray_center_uv[1] + half
 
         keep = (
-            (candidate_points[:, 0] >= x_min) & (candidate_points[:, 0] <= x_max) &
-            (candidate_points[:, 1] >= y_min) & (candidate_points[:, 1] <= y_max)
+            (cand_uv[:, 0] >= u_min) & (cand_uv[:, 0] <= u_max) &
+            (cand_uv[:, 1] >= v_min) & (cand_uv[:, 1] <= v_max)
         )
         pts = candidate_points[keep]
+        pts_uv = cand_uv[keep]
         if pts.shape[0] < 20:
             return [], []
 
-        width = int(np.ceil((x_max - x_min) / res)) + 1
-        height = int(np.ceil((y_max - y_min) / res)) + 1
+        width = int(np.ceil((u_max - u_min) / res)) + 1
+        height = int(np.ceil((v_max - v_min) / res)) + 1
         density = np.zeros((height, width), dtype=np.uint16)
 
-        u = np.clip(((pts[:, 0] - x_min) / res).astype(np.int32), 0, width - 1)
-        v = np.clip(((pts[:, 1] - y_min) / res).astype(np.int32), 0, height - 1)
-        np.add.at(density, (v, u), 1)
+        u_idx = np.clip(((pts_uv[:, 0] - u_min) / res).astype(np.int32), 0, width - 1)
+        v_idx = np.clip(((pts_uv[:, 1] - v_min) / res).astype(np.int32), 0, height - 1)
+        np.add.at(density, (v_idx, u_idx), 1)
 
         if density.max() <= 0:
             return [], []
@@ -418,21 +612,24 @@ class ObjectDetection(Node):
             if area < min_area_px:
                 continue
 
-            (cx_px, cy_px), r_px = cv2.minEnclosingCircle(cnt)
+            (cu_px, cv_px), r_px = cv2.minEnclosingCircle(cnt)
             radius = float(r_px) * res
             if not (CUP_MIN_RADIUS <= radius <= CUP_MAX_RADIUS):
                 continue
 
-            cx = x_min + float(cx_px) * res
-            cy = y_min + float(cy_px) * res
+            center_uv = np.asarray(
+                [u_min + float(cu_px) * res, v_min + float(cv_px) * res],
+                dtype=float,
+            )
 
             evaluated = self._evaluate_candidate(
-                cx=cx,
-                cy=cy,
+                center_uv=center_uv,
                 radius=radius,
                 candidate_points=pts,
+                candidate_points_uv=pts_uv,
                 reference_points=reference_points,
                 tray_z=float(tray_center[2]),
+                tray_frame=tray_frame,
             )
             if evaluated is None:
                 continue
@@ -463,17 +660,17 @@ class ObjectDetection(Node):
             )
             if circles is not None:
                 for c in np.asarray(circles[0], dtype=np.float32):
-                    cx_px, cy_px, r_px = float(c[0]), float(c[1]), float(c[2])
-                    cx = x_min + cx_px * res
-                    cy = y_min + cy_px * res
+                    cu_px, cv_px, r_px = float(c[0]), float(c[1]), float(c[2])
                     radius = float(r_px) * res
+                    center_uv = np.asarray([u_min + cu_px * res, v_min + cv_px * res], dtype=float)
                     evaluated = self._evaluate_candidate(
-                        cx=cx,
-                        cy=cy,
+                        center_uv=center_uv,
                         radius=radius,
                         candidate_points=pts,
+                        candidate_points_uv=pts_uv,
                         reference_points=reference_points,
                         tray_z=float(tray_center[2]),
+                        tray_frame=tray_frame,
                     )
                     if evaluated is None:
                         continue
@@ -500,27 +697,42 @@ class ObjectDetection(Node):
         return accepted_c, accepted_d
 
     def _evaluate_candidate(self,
-                            cx: float,
-                            cy: float,
+                            center_uv: np.ndarray,
                             radius: float,
                             candidate_points: np.ndarray,
+                            candidate_points_uv: np.ndarray,
                             reference_points: np.ndarray,
-                            tray_z: float) -> Tuple[np.ndarray, List[float], int] | None:
-        radial = np.hypot(candidate_points[:, 0] - cx, candidate_points[:, 1] - cy)
-        local = candidate_points[radial <= max(radius, 0.015)]
+                            tray_z: float,
+                            tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+                            ) -> Tuple[np.ndarray, List[float], int] | None:
+        radial = np.linalg.norm(candidate_points_uv - center_uv[None, :], axis=1)
+        ring_delta = max(RING_DELTA_MIN, RING_DELTA_RATIO * radius)
+        ring_uv = candidate_points_uv[
+            (radial >= max(0.0, radius - ring_delta)) &
+            (radial <= (radius + ring_delta))
+        ]
+        if ring_uv.shape[0] < RING_MIN_POINTS:
+            return None
+
+        fit_center_uv, fit_r, _, _ = self._robust_circle_fit(ring_uv, center_uv, radius)
+
+        radial_refined = np.linalg.norm(candidate_points_uv - fit_center_uv[None, :], axis=1)
+        local = candidate_points[radial_refined <= max(fit_r, 0.015)]
         support = int(local.shape[0])
         if support < 8:
             return None
 
-        cz = float(np.median(local[:, 2]))
+        center_on_plane = self._tray_uv_to_world(fit_center_uv, tray_frame)
+        center_z_offset = float(self.get_parameter("holder_center_plane_offset_z").value)
+        cz = float(center_on_plane[2] + center_z_offset)
         z05 = float(np.percentile(local[:, 2], 5))
         z95 = float(np.percentile(local[:, 2], 95))
         h = float(np.clip(z95 - z05, CUP_MIN_HEIGHT, CUP_MAX_HEIGHT))
-        center = np.asarray([cx, cy, cz], dtype=float)
-        if self.is_holder_occupied(center, radius, reference_points, tray_z):
+        center = np.asarray([center_on_plane[0], center_on_plane[1], cz], dtype=float)
+        if self.is_holder_occupied(center, fit_r, reference_points, tray_z):
             return None
 
-        diameter = float(radius * 2.0)
+        diameter = float(fit_r * 2.0)
         return center, [diameter, diameter, h], support
 
     def _append_or_replace_candidate(self,
