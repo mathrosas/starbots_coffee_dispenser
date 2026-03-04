@@ -1,6 +1,6 @@
 octomap_resolution: 0.01
-sensors:
-  - cupholder_tray_cam_pointcloud
+sensors: []
+  # - cupholder_tray_cam_pointcloud
   # - cupholder_tray_cam_depth_image
 
 cupholder_tray_cam_pointcloud:

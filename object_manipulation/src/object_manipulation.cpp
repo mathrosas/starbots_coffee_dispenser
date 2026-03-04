@@ -33,7 +33,7 @@ static const std::string PILZ_LIN = "LIN";
 
 // offsets / “magic numbers”:
 static constexpr double PREGRASP_Z_OFFSET = 0.20; // 20 cm above detected object
-static constexpr double APPROACH_Z_DELTA = 0.01;  // straight down 8.5 cm
+static constexpr double APPROACH_Z_DELTA = 0.01;  // straight down
 
 // project defaults for fixed-cup mode [0.260, 0.370, -0.007]
 static constexpr double FIXED_CUP_X = 0.299; // 0.300
@@ -194,8 +194,8 @@ public:
     const double pre_x = cup_x;
     const double pre_y = cup_y;
     const double pre_z = cup_z + PREGRASP_Z_OFFSET;
-    const double place_x = holder.position.x - 0.005;
-    const double place_y = holder.position.y;
+    const double place_x = holder.position.x;
+    const double place_y = holder.position.y - 0.005;
     const double place_z = holder.position.z;
 
     RCLCPP_INFO(LOGGER, "Using fixed cup pose at (%.3f, %.3f, %.3f)", cup_x,

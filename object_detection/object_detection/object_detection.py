@@ -86,9 +86,9 @@ class ObjectDetection(Node):
         self.declare_parameter("holder_match_max_dist", 0.08)
         self.declare_parameter("log_ordered_holders", False)
         self.declare_parameter("holder_tf_stable_frames", 3)
-        self.declare_parameter("holder_smoothing_alpha", 0.25)
+        self.declare_parameter("holder_smoothing_alpha", 0.15)
         self.declare_parameter("holder_max_jump", 0.03)
-        self.declare_parameter("holder_min_separation", 0.05)
+        self.declare_parameter("holder_min_separation", 0.00)
         self.declare_parameter("holder_hold_missing_frames", 20)
 
         # OpenCV detector params
@@ -100,7 +100,7 @@ class ObjectDetection(Node):
         self.declare_parameter("opencv_use_hough", True)
         self.declare_parameter("opencv_hough_dp", 1.2)
         self.declare_parameter("opencv_hough_param1", 80.0)
-        self.declare_parameter("opencv_hough_param2", 10.0)
+        self.declare_parameter("opencv_hough_param2", 16.0)
         self.declare_parameter("pointcloud_topic", "/wrist_rgbd_depth_sensor/points")
 
         pointcloud_topic = str(self.get_parameter("pointcloud_topic").value)
