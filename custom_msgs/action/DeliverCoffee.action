@@ -1,0 +1,8 @@
+uint32 cupholder_id
+---
+bool success
+string message
+---
+string stage
+float32 progress
+uint32 cupholder_id

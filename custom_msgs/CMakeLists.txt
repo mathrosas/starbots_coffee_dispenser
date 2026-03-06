@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
 
 # uncomment the following section in order to fill in
 # further dependencies manually.
@@ -30,7 +31,8 @@ endif()
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedSurfaces.msg"
   "msg/DetectedObjects.msg"
-  DEPENDENCIES geometry_msgs std_msgs
+  "action/DeliverCoffee.action"
+  DEPENDENCIES geometry_msgs std_msgs action_msgs
 )
 
 ament_package()

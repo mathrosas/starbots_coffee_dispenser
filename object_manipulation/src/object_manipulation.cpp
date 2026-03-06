@@ -1,24 +1,27 @@
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 
+#include <custom_msgs/action/deliver_coffee.hpp>
 #include <custom_msgs/msg/detected_objects.hpp>
 #include <moveit_msgs/msg/display_robot_state.hpp>
 #include <moveit_msgs/msg/display_trajectory.hpp>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
 
 #include <rclcpp/executors/single_threaded_executor.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 #include <chrono>
 #include <cmath>
 #include <functional>
-#include <future>
 #include <iomanip>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // program variables
@@ -27,6 +30,7 @@ static const std::string PLANNING_GROUP_ROBOT = "ur_manipulator";
 static const std::string PLANNING_GROUP_GRIPPER = "gripper";
 static const std::string REF_FRAME = "base_link";
 static const std::string CUPHOLDER_TOPIC = "/cup_holder_detected";
+static const std::string DELIVER_COFFEE_ACTION = "deliver_coffee";
 static const std::string OMPL_PIPELINE = "ompl";
 static const std::string PILZ_PIPELINE = "pilz_industrial_motion_planner";
 static const std::string PILZ_LIN = "LIN";
@@ -43,6 +47,9 @@ static constexpr double FIXED_CUP_Z = 0.035;
 class PickAndPlacePerception {
 public:
   using DetectedObject = custom_msgs::msg::DetectedObjects;
+  using DeliverCoffee = custom_msgs::action::DeliverCoffee;
+  using GoalHandleDeliverCoffee =
+      rclcpp_action::ServerGoalHandle<DeliverCoffee>;
 
   PickAndPlacePerception(rclcpp::Node::SharedPtr base_node_)
       : base_node_(base_node_) {
@@ -120,11 +127,18 @@ public:
     joint_model_group_gripper_ =
         current_state_gripper_->getJointModelGroup(PLANNING_GROUP_GRIPPER);
 
-    cupholder_promise_ = std::make_shared<std::promise<DetectedObject>>();
-    cupholder_future_ = cupholder_promise_->get_future();
     cupholder_sub_ = move_group_node_->create_subscription<DetectedObject>(
         CUPHOLDER_TOPIC, 10,
         std::bind(&PickAndPlacePerception::cupholder_callback, this,
+                  std::placeholders::_1));
+
+    action_server_ = rclcpp_action::create_server<DeliverCoffee>(
+        base_node_, DELIVER_COFFEE_ACTION,
+        std::bind(&PickAndPlacePerception::handle_goal, this,
+                  std::placeholders::_1, std::placeholders::_2),
+        std::bind(&PickAndPlacePerception::handle_cancel, this,
+                  std::placeholders::_1),
+        std::bind(&PickAndPlacePerception::handle_accepted, this,
                   std::placeholders::_1));
 
     // print out basic system information
@@ -150,7 +164,10 @@ public:
     move_group_gripper_->setStartStateToCurrentState();
 
     // indicate initialization
-    RCLCPP_INFO(LOGGER, "Class Initialized: Pick And Place Perception");
+    RCLCPP_INFO(
+        LOGGER,
+        "Class Initialized: Pick And Place Perception (Action Server: /%s)",
+        DELIVER_COFFEE_ACTION.c_str());
   }
 
   ~PickAndPlacePerception() {
@@ -161,21 +178,24 @@ public:
     RCLCPP_INFO(LOGGER, "Class Terminated: Pick And Place Perception");
   }
 
-  void execute_trajectory_plan() {
-    using namespace std::chrono_literals;
+  bool execute_trajectory_plan(
+      uint32_t holder_id,
+      const std::shared_ptr<GoalHandleDeliverCoffee> &goal_handle,
+      std::string &failure_reason) {
+    publish_feedback(goal_handle, "waiting_for_target_cupholder", 0.02f,
+                     holder_id);
 
-    RCLCPP_INFO(LOGGER, "Waiting for target cupholder id=%d on %s ...",
-                target_holder_id_, CUPHOLDER_TOPIC.c_str());
-    while (rclcpp::ok()) {
-      if (cupholder_future_.wait_for(5s) == std::future_status::ready) {
-        break;
-      }
-      RCLCPP_INFO(LOGGER, "No target cupholder yet, waiting another 5s...");
+    DetectedObject holder;
+    if (!wait_for_cupholder(holder_id, holder, std::chrono::seconds(30))) {
+      failure_reason = "Timed out waiting for requested cupholder detection";
+      return false;
     }
-    if (!rclcpp::ok()) {
-      return;
+
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
     }
-    const auto holder = cupholder_future_.get();
+
     RCLCPP_INFO(LOGGER,
                 "Using cupholder id=%u pose=(%.3f, %.3f, %.3f) w=%.3f h=%.3f "
                 "t=%.3f",
@@ -203,6 +223,7 @@ public:
     RCLCPP_INFO(LOGGER, "Using fixed cup pose at (%.3f, %.3f, %.3f)", cup_x,
                 cup_y, cup_z);
     RCLCPP_INFO(LOGGER, "Planning and Executing Pick And Place Perception...");
+    publish_feedback(goal_handle, "start_delivery", 0.05f, holder_id);
 
     // 1. go to pregrasp
     RCLCPP_INFO(LOGGER, "Going to Pregrasp Position (%.3f, %.3f, %.3f)...",
@@ -210,33 +231,51 @@ public:
     setup_goal_pose_target(pre_x, pre_y, pre_z, -1.000, +0.000, +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
-      return;
+      failure_reason = "Failed pregrasp kinematics";
+      return false;
     }
+    publish_feedback(goal_handle, "pregrasp_reached", 0.12f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 2. open the gripper
     RCLCPP_INFO(LOGGER, "Opening Gripper...");
     setup_named_pose_gripper("open");
     plan_trajectory_gripper();
     if (!execute_trajectory_gripper()) {
-      return;
+      failure_reason = "Failed to open gripper";
+      return false;
     }
+    publish_feedback(goal_handle, "gripper_open", 0.20f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 3. approach straight down
     RCLCPP_INFO(LOGGER, "Approaching object...");
     setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
-      return;
+      failure_reason = "Failed Cartesian approach to cup";
+      return false;
     }
+    publish_feedback(goal_handle, "approached_cup", 0.32f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 4. close the gripper
     log_xy_error_to_point("before_grasp_close", cup_x, cup_y, cup_z);
@@ -244,22 +283,34 @@ public:
     setup_named_pose_gripper("close");
     plan_trajectory_gripper();
     if (!execute_trajectory_gripper()) {
-      return;
+      failure_reason = "Failed to close gripper";
+      return false;
     }
+    publish_feedback(goal_handle, "gripper_closed", 0.42f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 5. retreat
     RCLCPP_INFO(LOGGER, "Retreating...");
-    setup_waypoints_target(+0.000, +0.000, 4 * APPROACH_Z_DELTA);
+    setup_waypoints_target(+0.000, +0.000, 5 * APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
-      return;
+      failure_reason = "Failed Cartesian retreat";
+      return false;
     }
+    publish_feedback(goal_handle, "retreated_with_cup", 0.50f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 6. rotate shoulder
     RCLCPP_INFO(LOGGER, "Rotate Shoulder Joint 120 degrees...");
@@ -273,11 +324,17 @@ public:
         joint_group_positions_robot_[5]);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
-      return;
+      failure_reason = "Failed shoulder rotation";
+      return false;
     }
+    publish_feedback(goal_handle, "rotated_to_place_side", 0.62f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 7. go to pre-place position (from detected cupholder)
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
@@ -287,11 +344,17 @@ public:
                            +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
-      return;
+      failure_reason = "Failed pre-place kinematics";
+      return false;
     }
+    publish_feedback(goal_handle, "pre_place_reached", 0.74f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 9. approach down to cupholder center
     RCLCPP_INFO(LOGGER,
@@ -301,23 +364,35 @@ public:
     setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
-      return;
+      failure_reason = "Failed Cartesian insert to cupholder";
+      return false;
     }
     log_xy_error_to_holder("after_insert_cartesian", place_x, place_y, place_z);
+    publish_feedback(goal_handle, "cup_inserted", 0.84f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 10. open the gripper
     RCLCPP_INFO(LOGGER, "Opening Gripper...");
     setup_named_pose_gripper("open");
     plan_trajectory_gripper();
     if (!execute_trajectory_gripper()) {
-      return;
+      failure_reason = "Failed to release cup";
+      return false;
     }
+    publish_feedback(goal_handle, "cup_released", 0.90f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 11. retreat from cupholder center
     RCLCPP_INFO(LOGGER,
@@ -327,11 +402,17 @@ public:
                            -1.000, +0.000, +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
-      return;
+      failure_reason = "Failed post-place retreat";
+      return false;
     }
+    publish_feedback(goal_handle, "post_place_retreat", 0.95f, holder_id);
 
     // wait for few seconds
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (is_cancel_requested(goal_handle)) {
+      failure_reason = "Goal canceled";
+      return false;
+    }
 
     // 12. Going to Initial Position
     RCLCPP_INFO(LOGGER, "Going to Initial Position...");
@@ -339,10 +420,13 @@ public:
                              +0.0000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
-      return;
+      failure_reason = "Failed return to initial pose";
+      return false;
     }
+    publish_feedback(goal_handle, "returned_home", 1.0f, holder_id);
 
     RCLCPP_INFO(LOGGER, "Pick And Place Perception Execution Complete");
+    return true;
   }
 
 private:
@@ -380,10 +464,12 @@ private:
   bool plan_success_cartesian_{false};
 
   int target_holder_id_{1};
-  std::shared_ptr<std::promise<DetectedObject>> cupholder_promise_;
-  std::future<DetectedObject> cupholder_future_;
   rclcpp::Subscription<DetectedObject>::SharedPtr cupholder_sub_;
-  bool cupholder_received_{false};
+  rclcpp_action::Server<DeliverCoffee>::SharedPtr action_server_;
+  std::mutex cupholder_mutex_;
+  std::unordered_map<uint32_t, DetectedObject> latest_cupholders_;
+  std::mutex execution_mutex_;
+  bool execution_active_{false};
 
   static void ensure_sim_time_true(const rclcpp::Node::SharedPtr &node) {
     try {
@@ -408,19 +494,144 @@ private:
     }
   }
 
+  rclcpp_action::GoalResponse
+  handle_goal(const rclcpp_action::GoalUUID &,
+              std::shared_ptr<const DeliverCoffee::Goal> goal) {
+    if (!goal || goal->cupholder_id == 0) {
+      RCLCPP_WARN(LOGGER,
+                  "Rejecting DeliverCoffee goal: cupholder_id must be > 0.");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    {
+      std::lock_guard<std::mutex> lock(execution_mutex_);
+      if (execution_active_) {
+        RCLCPP_WARN(
+            LOGGER,
+            "Rejecting DeliverCoffee goal for cupholder_id=%u: server busy.",
+            goal->cupholder_id);
+        return rclcpp_action::GoalResponse::REJECT;
+      }
+      execution_active_ = true;
+    }
+    RCLCPP_INFO(LOGGER, "Accepted DeliverCoffee goal for cupholder_id=%u",
+                goal->cupholder_id);
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+  }
+
+  rclcpp_action::CancelResponse
+  handle_cancel(const std::shared_ptr<GoalHandleDeliverCoffee> goal_handle) {
+    (void)goal_handle;
+    RCLCPP_INFO(LOGGER, "Cancel request received for DeliverCoffee");
+    return rclcpp_action::CancelResponse::ACCEPT;
+  }
+
+  void handle_accepted(
+      const std::shared_ptr<GoalHandleDeliverCoffee> goal_handle) {
+    std::thread([this, goal_handle]() { execute_goal(goal_handle); }).detach();
+  }
+
+  void execute_goal(const std::shared_ptr<GoalHandleDeliverCoffee> goal_handle) {
+    const auto goal = goal_handle->get_goal();
+    auto result = std::make_shared<DeliverCoffee::Result>();
+
+    const auto holder_id = goal->cupholder_id;
+    std::string failure_reason;
+    bool ok = false;
+    try {
+      ok = execute_trajectory_plan(holder_id, goal_handle, failure_reason);
+    } catch (const std::exception &e) {
+      failure_reason = std::string("Unhandled exception: ") + e.what();
+      ok = false;
+    } catch (...) {
+      failure_reason = "Unhandled non-standard exception";
+      ok = false;
+    }
+
+    if (goal_handle->is_canceling() || failure_reason == "Goal canceled") {
+      result->success = false;
+      result->message = "DeliverCoffee canceled";
+      goal_handle->canceled(result);
+      RCLCPP_INFO(LOGGER, "DeliverCoffee canceled for cupholder_id=%u",
+                  holder_id);
+      clear_execution_active();
+      return;
+    }
+
+    if (ok) {
+      result->success = true;
+      result->message = "DeliverCoffee completed successfully";
+      goal_handle->succeed(result);
+      RCLCPP_INFO(LOGGER, "DeliverCoffee succeeded for cupholder_id=%u",
+                  holder_id);
+      clear_execution_active();
+      return;
+    }
+
+    result->success = false;
+    result->message = failure_reason.empty() ? "DeliverCoffee failed"
+                                             : failure_reason;
+    goal_handle->abort(result);
+    RCLCPP_ERROR(LOGGER, "DeliverCoffee aborted for cupholder_id=%u: %s",
+                 holder_id, result->message.c_str());
+    clear_execution_active();
+  }
+
+  void clear_execution_active() {
+    std::lock_guard<std::mutex> lock(execution_mutex_);
+    execution_active_ = false;
+  }
+
+  bool wait_for_cupholder(uint32_t holder_id, DetectedObject &holder,
+                          std::chrono::seconds timeout) {
+    const auto start = std::chrono::steady_clock::now();
+    while (rclcpp::ok()) {
+      {
+        std::lock_guard<std::mutex> lock(cupholder_mutex_);
+        const auto it = latest_cupholders_.find(holder_id);
+        if (it != latest_cupholders_.end()) {
+          holder = it->second;
+          return true;
+        }
+      }
+
+      if (std::chrono::steady_clock::now() - start > timeout) {
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
+  }
+
+  bool is_cancel_requested(
+      const std::shared_ptr<GoalHandleDeliverCoffee> &goal_handle) const {
+    return goal_handle && goal_handle->is_canceling();
+  }
+
+  void publish_feedback(
+      const std::shared_ptr<GoalHandleDeliverCoffee> &goal_handle,
+      const std::string &stage, float progress, uint32_t holder_id) {
+    if (!goal_handle) {
+      return;
+    }
+    auto feedback = std::make_shared<DeliverCoffee::Feedback>();
+    feedback->stage = stage;
+    feedback->progress = progress;
+    feedback->cupholder_id = holder_id;
+    goal_handle->publish_feedback(feedback);
+  }
+
   void cupholder_callback(const DetectedObject::SharedPtr msg) {
-    if (cupholder_received_) {
+    if (!msg) {
       return;
     }
-    if (static_cast<int>(msg->object_id) != target_holder_id_) {
-      return;
+    {
+      std::lock_guard<std::mutex> lock(cupholder_mutex_);
+      latest_cupholders_[msg->object_id] = *msg;
     }
-    cupholder_received_ = true;
-    cupholder_promise_->set_value(*msg);
-    cupholder_sub_.reset();
-    RCLCPP_INFO(LOGGER, "Received target cupholder id=%u at (%.3f, %.3f, %.3f)",
-                msg->object_id, msg->position.x, msg->position.y,
-                msg->position.z);
+    RCLCPP_INFO_THROTTLE(
+        LOGGER, *move_group_node_->get_clock(), 3000,
+        "Updated cupholder id=%u at (%.3f, %.3f, %.3f)", msg->object_id,
+        msg->position.x, msg->position.y, msg->position.z);
   }
 
   void setup_joint_value_target(float angle0, float angle1, float angle2,
@@ -605,7 +816,7 @@ int main(int argc, char **argv) {
   std::shared_ptr<rclcpp::Node> base_node =
       std::make_shared<rclcpp::Node>("pick_and_place_perception");
   PickAndPlacePerception pick_and_place(base_node);
-  pick_and_place.execute_trajectory_plan();
+  rclcpp::spin(base_node);
   rclcpp::shutdown();
   return 0;
 }
