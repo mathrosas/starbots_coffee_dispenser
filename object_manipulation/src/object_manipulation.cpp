@@ -281,9 +281,9 @@ public:
 
     // 7. go to pre-place position (from detected cupholder)
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.070);
+                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.066);
     setup_goal_pose_target(place_x, place_y,
-                           place_z + PREGRASP_Z_OFFSET + 0.070, -1.000, +0.000,
+                           place_z + PREGRASP_Z_OFFSET + 0.066, -1.000, +0.000,
                            +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
@@ -297,7 +297,7 @@ public:
     RCLCPP_INFO(LOGGER,
                 "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
                 place_x, place_y,
-                place_z + PREGRASP_Z_OFFSET + 0.070 - APPROACH_Z_DELTA);
+                place_z + PREGRASP_Z_OFFSET + 0.066 - APPROACH_Z_DELTA);
     setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
