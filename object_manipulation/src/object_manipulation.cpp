@@ -194,8 +194,10 @@ public:
     const double pre_x = cup_x;
     const double pre_y = cup_y;
     const double pre_z = cup_z + PREGRASP_Z_OFFSET;
-    const double place_x = holder.position.x - 0.005;
-    const double place_y = holder.position.y + 0.014;
+    // const double place_x = holder.position.x - 0.005;
+    // const double place_y = holder.position.y + 0.014;
+    const double place_x = holder.position.x;
+    const double place_y = holder.position.y;
     const double place_z = holder.position.z;
 
     RCLCPP_INFO(LOGGER, "Using fixed cup pose at (%.3f, %.3f, %.3f)", cup_x,
@@ -279,9 +281,9 @@ public:
 
     // 7. go to pre-place position (from detected cupholder)
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.045);
+                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.075);
     setup_goal_pose_target(place_x, place_y,
-                           place_z + PREGRASP_Z_OFFSET + 0.045, -1.000, +0.000,
+                           place_z + PREGRASP_Z_OFFSET + 0.075, -1.000, +0.000,
                            +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
@@ -295,7 +297,7 @@ public:
     RCLCPP_INFO(LOGGER,
                 "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
                 place_x, place_y,
-                place_z + PREGRASP_Z_OFFSET + 0.045 - APPROACH_Z_DELTA);
+                place_z + PREGRASP_Z_OFFSET + 0.075 - APPROACH_Z_DELTA);
     setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {

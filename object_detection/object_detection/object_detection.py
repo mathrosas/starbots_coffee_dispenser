@@ -15,6 +15,11 @@ from typing import List, Tuple
 
 from custom_msgs.msg import DetectedObjects, DetectedSurfaces
 
+try:
+    import pcl  # type: ignore
+except ImportError:
+    pcl = None
+
 
 # =========================
 # Hard-coded configuration
@@ -49,6 +54,13 @@ OCCUPANCY_PTS_THRESH = 20
 
 # De-duplication
 MIN_CENTROID_DISTANCE = 0.05
+SIM_CLUSTER_TOLERANCE = 0.04
+SIM_MIN_CLUSTER_SIZE = 30
+SIM_MAX_CLUSTER_SIZE = 100000
+SIM_OCCUPANCY_RADIUS_PAD = 0.01
+SIM_CUPHOLDER_OFFSET_X = -0.0055
+SIM_CUPHOLDER_OFFSET_Y = -0.013
+SIM_CUPHOLDER_OFFSET_Z = 0.01
 
 # Tray plane / ring refinement
 PLANE_RANSAC_ITERS = 120
@@ -71,13 +83,20 @@ CUP_HOLDER_FRAME_PREFIX = "ch_"
 
 class ObjectDetection(Node):
     """
-    OpenCV-based cup-holder detector over wrist depth cloud:
+    Cup-holder detector over wrist depth cloud.
       1) PointCloud2 -> base_link XYZ
       2) ROI filter
-      3) Estimate tray top from high-z points
-      4) Build below-tray band points
-      5) Bird's-eye density map + OpenCV contour circles
-      6) Publish cup-holder markers/messages + STATIC TFs ch_#
+      3) Estimate tray top
+      4) Keep points just below tray
+      5) Euclidean clustering + geometric gates
+      6) Occupancy rejection + sim offsets
+      7) Publish cup-holder markers/messages + STATIC TFs ch_#
+
+    Existing OpenCV helper methods are retained for compatibility/tuning.
+
+    Also publishes fixed cup TF:
+      1) PointCloud2 -> base_link XYZ
+      2) Publish STATIC TF 'cup' and 'ch_<n>' in 'base_link'
 
     Node interface is kept equivalent to the previous implementation:
       - /tray_marker            (MarkerArray)
@@ -154,6 +173,7 @@ class ObjectDetection(Node):
         self.last_tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
         self.last_sensor_origin_base: np.ndarray | None = None
         self.holder_center_histories: List[deque[np.ndarray]] = []
+        self._logged_no_pcl_backend = False
 
         self.publish_static_cup_tf()
         self.get_logger().info(
@@ -184,12 +204,22 @@ class ObjectDetection(Node):
                 self.publish_tray([tray_center], [tray_dim])
                 return
 
-            ch_centroids, ch_dims = self.detect_cupholders_opencv(
-                candidate_points=band,
-                reference_points=roi,
-                tray_center=tray_center,
-                tray_frame=tray_frame,
-            )
+            # Sim-style cup-holder extraction (cluster + occupancy + offsets).
+            if pcl is not None:
+                ch_centroids, ch_dims = self.detect_cupholders_sim_pcl(
+                    candidate_points=band,
+                    reference_points=roi,
+                )
+            else:
+                if not self._logged_no_pcl_backend:
+                    self.get_logger().warn(
+                        "python-pcl not available. Using numpy fallback for cup-holder clustering."
+                    )
+                    self._logged_no_pcl_backend = True
+                ch_centroids, ch_dims = self.detect_cupholders_sim(
+                    candidate_points=band,
+                    reference_points=roi,
+                )
 
             # Keep stable IDs ch_1..ch_n frame to frame
             ch_centroids, ch_dims = self.stable_order_holders(
@@ -597,6 +627,231 @@ class ObjectDetection(Node):
             work = new_work
 
         return best_center, best_r, best_rmse, best_count
+
+    # --------- Sim-style cup-holder detection ---------
+    def detect_cupholders_sim_pcl(
+        self,
+        candidate_points: np.ndarray,
+        reference_points: np.ndarray,
+    ) -> Tuple[List[List[float]], List[List[float]]]:
+        """
+        Sim-equivalent implementation using python-pcl clustering backend.
+        """
+        if candidate_points.shape[0] < SIM_MIN_CLUSTER_SIZE:
+            return [], []
+
+        cloud = pcl.PointCloud()
+        cloud.from_array(candidate_points.astype(np.float32))
+
+        tree = cloud.make_kdtree()
+        ec = cloud.make_EuclideanClusterExtraction()
+        ec.set_ClusterTolerance(SIM_CLUSTER_TOLERANCE)
+        ec.set_MinClusterSize(SIM_MIN_CLUSTER_SIZE)
+        ec.set_MaxClusterSize(SIM_MAX_CLUSTER_SIZE)
+        ec.set_SearchMethod(tree)
+        cluster_indices = ec.Extract()
+
+        centroids: List[List[float]] = []
+        dimensions_list: List[List[float]] = []
+        for indices in cluster_indices:
+            cluster = cloud.extract(indices)
+            cluster_arr = cluster.to_array()
+            if cluster_arr.shape[0] == 0:
+                continue
+
+            centroid = np.mean(cluster_arr, axis=0)
+            min_coords = np.min(cluster_arr, axis=0)
+            max_coords = np.max(cluster_arr, axis=0)
+            dimensions = (max_coords - min_coords).astype(float)
+
+            radius = float(dimensions[0]) / 2.0
+            height = float(dimensions[2])
+
+            radial = np.hypot(
+                reference_points[:, 0] - float(centroid[0]),
+                reference_points[:, 1] - float(centroid[1]),
+            )
+            points_above = np.sum(
+                (radial < (radius + SIM_OCCUPANCY_RADIUS_PAD))
+                & (reference_points[:, 2] > (float(centroid[2]) + OCCUPANCY_Z_MARGIN))
+            )
+            if int(points_above) > OCCUPANCY_PTS_THRESH:
+                continue
+
+            if not (CUP_MIN_RADIUS <= radius <= CUP_MAX_RADIUS):
+                continue
+            if not (CUP_MIN_HEIGHT <= height <= CUP_MAX_HEIGHT):
+                continue
+
+            centroid_adj = np.asarray(centroid, dtype=float).copy()
+            centroid_adj[0] += SIM_CUPHOLDER_OFFSET_X
+            centroid_adj[1] += SIM_CUPHOLDER_OFFSET_Y
+            centroid_adj[2] += SIM_CUPHOLDER_OFFSET_Z
+
+            centroids.append(
+                [
+                    float(centroid_adj[0]),
+                    float(centroid_adj[1]),
+                    float(centroid_adj[2]),
+                ]
+            )
+            dimensions_list.append(
+                [float(dimensions[0]), float(dimensions[1]), float(dimensions[2])]
+            )
+
+        return self.filter_close_cupholders_with_dims(
+            centroids, dimensions_list, MIN_CENTROID_DISTANCE
+        )
+
+    def detect_cupholders_sim(
+        self,
+        candidate_points: np.ndarray,
+        reference_points: np.ndarray,
+    ) -> Tuple[List[List[float]], List[List[float]]]:
+        """
+        - Euclidean cluster extraction on below-tray points
+        - radius/height gating
+        - occupied-hole rejection from points above cluster
+        - fixed camera-pov offsets
+        """
+        if candidate_points.shape[0] < SIM_MIN_CLUSTER_SIZE:
+            return [], []
+
+        clusters = self.euclidean_cluster_indices(
+            candidate_points,
+            tolerance=SIM_CLUSTER_TOLERANCE,
+            min_cluster_size=SIM_MIN_CLUSTER_SIZE,
+            max_cluster_size=SIM_MAX_CLUSTER_SIZE,
+        )
+
+        centroids: List[List[float]] = []
+        dimensions_list: List[List[float]] = []
+        for cluster_indices in clusters:
+            cluster = candidate_points[cluster_indices]
+            centroid = np.mean(cluster, axis=0)
+            min_coords = np.min(cluster, axis=0)
+            max_coords = np.max(cluster, axis=0)
+            dimensions = (max_coords - min_coords).astype(float)
+
+            radius = float(dimensions[0]) / 2.0
+            height = float(dimensions[2])
+
+            radial = np.hypot(
+                reference_points[:, 0] - float(centroid[0]),
+                reference_points[:, 1] - float(centroid[1]),
+            )
+            points_above = np.sum(
+                (radial < (radius + SIM_OCCUPANCY_RADIUS_PAD))
+                & (reference_points[:, 2] > (float(centroid[2]) + OCCUPANCY_Z_MARGIN))
+            )
+            if int(points_above) > OCCUPANCY_PTS_THRESH:
+                continue
+
+            if not (CUP_MIN_RADIUS <= radius <= CUP_MAX_RADIUS):
+                continue
+            if not (CUP_MIN_HEIGHT <= height <= CUP_MAX_HEIGHT):
+                continue
+
+            centroid_adj = np.asarray(centroid, dtype=float).copy()
+            centroid_adj[0] += SIM_CUPHOLDER_OFFSET_X
+            centroid_adj[1] += SIM_CUPHOLDER_OFFSET_Y
+            centroid_adj[2] += SIM_CUPHOLDER_OFFSET_Z
+
+            centroids.append(
+                [
+                    float(centroid_adj[0]),
+                    float(centroid_adj[1]),
+                    float(centroid_adj[2]),
+                ]
+            )
+            dimensions_list.append(
+                [float(dimensions[0]), float(dimensions[1]), float(dimensions[2])]
+            )
+
+        return self.filter_close_cupholders_with_dims(
+            centroids, dimensions_list, MIN_CENTROID_DISTANCE
+        )
+
+    def euclidean_cluster_indices(
+        self,
+        points: np.ndarray,
+        tolerance: float,
+        min_cluster_size: int,
+        max_cluster_size: int,
+    ) -> List[List[int]]:
+        """
+        Euclidean clustering equivalent to PCL's extraction.
+        Uses a voxel-hash neighborhood to keep runtime acceptable without python-pcl.
+        """
+        if points.shape[0] == 0:
+            return []
+
+        cell_size = float(max(tolerance, 1e-6))
+        inv_cell = 1.0 / cell_size
+
+        keys = np.floor(points * inv_cell).astype(np.int32)
+        cell_map: dict[tuple[int, int, int], List[int]] = {}
+        for idx, key in enumerate(keys):
+            k = (int(key[0]), int(key[1]), int(key[2]))
+            cell_map.setdefault(k, []).append(idx)
+
+        visited = np.zeros(points.shape[0], dtype=bool)
+        tolerance_sq = float(tolerance * tolerance)
+        neighbor_offsets = [(dx, dy, dz) for dx in (-1, 0, 1)
+                            for dy in (-1, 0, 1)
+                            for dz in (-1, 0, 1)]
+
+        clusters: List[List[int]] = []
+        for seed in range(points.shape[0]):
+            if visited[seed]:
+                continue
+
+            queue = [seed]
+            visited[seed] = True
+            cluster: List[int] = []
+
+            while queue:
+                idx = queue.pop()
+                cluster.append(idx)
+                key = keys[idx]
+
+                for dx, dy, dz in neighbor_offsets:
+                    nk = (int(key[0] + dx), int(key[1] + dy), int(key[2] + dz))
+                    for j in cell_map.get(nk, []):
+                        if visited[j]:
+                            continue
+                        diff = points[j] - points[idx]
+                        if float(np.dot(diff, diff)) <= tolerance_sq:
+                            visited[j] = True
+                            queue.append(j)
+
+            if min_cluster_size <= len(cluster) <= max_cluster_size:
+                clusters.append(cluster)
+
+        return clusters
+
+    def filter_close_cupholders_with_dims(
+        self,
+        centroids: List[List[float]],
+        dims: List[List[float]],
+        min_distance: float,
+    ) -> Tuple[List[List[float]], List[List[float]]]:
+        """
+        Keep the first centroid, suppress subsequent centroids closer than min_distance.
+        Mirrors the de-duplication behavior in the sim detector.
+        """
+        filtered_centroids: List[List[float]] = []
+        filtered_dims: List[List[float]] = []
+        for centroid, dim in zip(centroids, dims):
+            too_close = False
+            for existing in filtered_centroids:
+                if np.linalg.norm(np.asarray(centroid) - np.asarray(existing)) < min_distance:
+                    too_close = True
+                    break
+            if not too_close:
+                filtered_centroids.append(centroid)
+                filtered_dims.append(dim)
+        return filtered_centroids, filtered_dims
 
     # --------- OpenCV cup-holder detection ---------
     def detect_cupholders_opencv(self,
