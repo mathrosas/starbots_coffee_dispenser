@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from collections import deque
+
 import cv2
 import numpy as np
 import rclpy
@@ -100,6 +102,9 @@ class ObjectDetection(Node):
         self.declare_parameter("holder_min_separation", 0.00)
         self.declare_parameter("holder_hold_missing_frames", 20)
         self.declare_parameter("holder_center_plane_offset_z", 0.0)
+        self.declare_parameter("holder_use_ray_plane_intersection", True)
+        self.declare_parameter("holder_temporal_median_window", 7)
+        self.declare_parameter("holder_temporal_min_samples", 5)
 
         # OpenCV detector params
         self.declare_parameter("opencv_map_resolution", 0.003)       # m/px
@@ -147,6 +152,8 @@ class ObjectDetection(Node):
         self.tracked_holder_dims: List[List[float]] = []
         self.tracked_holder_missing_counts: List[int] = []
         self.last_tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
+        self.last_sensor_origin_base: np.ndarray | None = None
+        self.holder_center_histories: List[deque[np.ndarray]] = []
 
         self.publish_static_cup_tf()
         self.get_logger().info(
@@ -191,6 +198,16 @@ class ObjectDetection(Node):
             ch_centroids, ch_dims = self.stabilize_holders(
                 ch_centroids, ch_dims, tray_center
             )
+            # Keep raw/stabilized centroids for next-frame matching.
+            self.last_holder_centroids_raw = [c[:] for c in ch_centroids]
+
+            # Require a short temporal warm-up and publish median centers.
+            ch_centroids, ch_dims, temporal_ready = self.temporal_median_holders(
+                ch_centroids, ch_dims
+            )
+            if not temporal_ready:
+                self.publish_tray([tray_center], [tray_dim])
+                return
 
             if bool(self.get_parameter("log_ordered_holders").value) and ch_centroids:
                 ordered = ", ".join(
@@ -200,7 +217,6 @@ class ObjectDetection(Node):
 
             self.publish_tray([tray_center], [tray_dim])
             self.publish_cupholders(ch_centroids, ch_dims)
-            self.last_holder_centroids_raw = [c[:] for c in ch_centroids]
 
         except Exception as e:
             self.get_logger().error(f"[ObjectDetection] Error in callback: {e}")
@@ -278,6 +294,7 @@ class ObjectDetection(Node):
                 ],
                 dtype=np.float32,
             )
+            self.last_sensor_origin_base = np.asarray(t, dtype=float).copy()
             q = np.array(
                 [
                     tf.transform.rotation.x,
@@ -483,6 +500,41 @@ class ObjectDetection(Node):
     ) -> np.ndarray:
         p0, u, v, _ = tray_frame
         return p0 + float(uv[0]) * u + float(uv[1]) * v
+
+    def _intersect_ray_with_tray_plane(
+        self,
+        ray_origin: np.ndarray,
+        ray_through: np.ndarray,
+        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    ) -> np.ndarray | None:
+        p0, _, _, n = tray_frame
+        direction = ray_through - ray_origin
+        denom = float(np.dot(n, direction))
+        if abs(denom) < 1e-9:
+            return None
+        t = float(np.dot(n, (p0 - ray_origin)) / denom)
+        if t <= 0.0:
+            return None
+        return ray_origin + t * direction
+
+    def _refine_center_on_plane_with_ray(
+        self,
+        local_points: np.ndarray,
+        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        fallback_center: np.ndarray,
+    ) -> np.ndarray:
+        if not bool(self.get_parameter("holder_use_ray_plane_intersection").value):
+            return fallback_center
+        if self.last_sensor_origin_base is None or local_points.shape[0] == 0:
+            return fallback_center
+
+        ray_origin = np.asarray(self.last_sensor_origin_base, dtype=float)
+        # Robust estimate of image-ray direction from local annulus points.
+        ray_through = np.median(local_points, axis=0).astype(float)
+        hit = self._intersect_ray_with_tray_plane(ray_origin, ray_through, tray_frame)
+        if hit is None:
+            return fallback_center
+        return np.asarray(hit, dtype=float)
 
     def _fit_circle_kasa(
         self,
@@ -723,6 +775,11 @@ class ObjectDetection(Node):
             return None
 
         center_on_plane = self._tray_uv_to_world(fit_center_uv, tray_frame)
+        center_on_plane = self._refine_center_on_plane_with_ray(
+            local_points=local,
+            tray_frame=tray_frame,
+            fallback_center=np.asarray(center_on_plane, dtype=float),
+        )
         center_z_offset = float(self.get_parameter("holder_center_plane_offset_z").value)
         cz = float(center_on_plane[2] + center_z_offset)
         z05 = float(np.percentile(local[:, 2], 5))
@@ -957,6 +1014,38 @@ class ObjectDetection(Node):
         ]
         self.tracked_holder_missing_counts = new_missing
         return self.tracked_holder_centroids, self.tracked_holder_dims
+
+    def temporal_median_holders(self,
+                                centroids: List[List[float]],
+                                dims: List[List[float]]) -> Tuple[List[List[float]], List[List[float]], bool]:
+        if not centroids:
+            self.holder_center_histories = []
+            return [], [], False
+
+        window = max(1, int(self.get_parameter("holder_temporal_median_window").value))
+        min_samples = max(1, int(self.get_parameter("holder_temporal_min_samples").value))
+        min_samples = min(min_samples, window)
+
+        needs_reset = (
+            len(self.holder_center_histories) != len(centroids)
+            or any(h.maxlen != window for h in self.holder_center_histories)
+        )
+        if needs_reset:
+            self.holder_center_histories = [deque(maxlen=window) for _ in centroids]
+
+        filtered_centroids: List[List[float]] = []
+        ready = True
+        for i, c in enumerate(centroids):
+            c_np = np.asarray(c, dtype=float)
+            self.holder_center_histories[i].append(c_np)
+            if len(self.holder_center_histories[i]) < min_samples:
+                ready = False
+
+            hist = np.vstack(self.holder_center_histories[i])
+            med = np.median(hist, axis=0)
+            filtered_centroids.append([float(med[0]), float(med[1]), float(med[2])])
+
+        return filtered_centroids, dims, ready
 
     # --------- Publishing ---------
     def publish_tray(self, centroids: List[List[float]], dims: List[List[float]]) -> None:

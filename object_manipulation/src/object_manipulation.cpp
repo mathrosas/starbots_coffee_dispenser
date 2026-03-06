@@ -194,8 +194,8 @@ public:
     const double pre_x = cup_x;
     const double pre_y = cup_y;
     const double pre_z = cup_z + PREGRASP_Z_OFFSET;
-    const double place_x = holder.position.x;
-    const double place_y = holder.position.y;
+    const double place_x = holder.position.x - 0.005;
+    const double place_y = holder.position.y + 0.014;
     const double place_z = holder.position.z;
 
     RCLCPP_INFO(LOGGER, "Using fixed cup pose at (%.3f, %.3f, %.3f)", cup_x,
