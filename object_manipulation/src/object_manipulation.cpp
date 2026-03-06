@@ -8,8 +8,8 @@
 #include <moveit_msgs/msg/robot_trajectory.hpp>
 
 #include <rclcpp/executors/single_threaded_executor.hpp>
-#include <rclcpp_action/rclcpp_action.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -525,12 +525,13 @@ private:
     return rclcpp_action::CancelResponse::ACCEPT;
   }
 
-  void handle_accepted(
-      const std::shared_ptr<GoalHandleDeliverCoffee> goal_handle) {
+  void
+  handle_accepted(const std::shared_ptr<GoalHandleDeliverCoffee> goal_handle) {
     std::thread([this, goal_handle]() { execute_goal(goal_handle); }).detach();
   }
 
-  void execute_goal(const std::shared_ptr<GoalHandleDeliverCoffee> goal_handle) {
+  void
+  execute_goal(const std::shared_ptr<GoalHandleDeliverCoffee> goal_handle) {
     const auto goal = goal_handle->get_goal();
     auto result = std::make_shared<DeliverCoffee::Result>();
 
@@ -568,8 +569,8 @@ private:
     }
 
     result->success = false;
-    result->message = failure_reason.empty() ? "DeliverCoffee failed"
-                                             : failure_reason;
+    result->message =
+        failure_reason.empty() ? "DeliverCoffee failed" : failure_reason;
     goal_handle->abort(result);
     RCLCPP_ERROR(LOGGER, "DeliverCoffee aborted for cupholder_id=%u: %s",
                  holder_id, result->message.c_str());
@@ -607,9 +608,10 @@ private:
     return goal_handle && goal_handle->is_canceling();
   }
 
-  void publish_feedback(
-      const std::shared_ptr<GoalHandleDeliverCoffee> &goal_handle,
-      const std::string &stage, float progress, uint32_t holder_id) {
+  void
+  publish_feedback(const std::shared_ptr<GoalHandleDeliverCoffee> &goal_handle,
+                   const std::string &stage, float progress,
+                   uint32_t holder_id) {
     if (!goal_handle) {
       return;
     }
@@ -628,10 +630,10 @@ private:
       std::lock_guard<std::mutex> lock(cupholder_mutex_);
       latest_cupholders_[msg->object_id] = *msg;
     }
-    RCLCPP_INFO_THROTTLE(
-        LOGGER, *move_group_node_->get_clock(), 3000,
-        "Updated cupholder id=%u at (%.3f, %.3f, %.3f)", msg->object_id,
-        msg->position.x, msg->position.y, msg->position.z);
+    RCLCPP_INFO_THROTTLE(LOGGER, *move_group_node_->get_clock(), 3000,
+                         "Updated cupholder id=%u at (%.3f, %.3f, %.3f)",
+                         msg->object_id, msg->position.x, msg->position.y,
+                         msg->position.z);
   }
 
   void setup_joint_value_target(float angle0, float angle1, float angle2,

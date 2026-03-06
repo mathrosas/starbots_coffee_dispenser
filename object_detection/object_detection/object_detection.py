@@ -166,8 +166,8 @@ class ObjectDetection(Node):
                 u = u_local + x_off
                 v = v_local
 
-                cv2.circle(annotated, (u, v), int(round(r_px)), (0, 255, 0), 2)
-                cv2.circle(annotated, (u, v), 3, (0, 0, 255), -1)
+                cv2.circle(annotated, (u, v), int(round(r_px)), (255, 0, 0), 2)
+                cv2.circle(annotated, (u, v), 3, (255, 0, 0), -1)
 
                 xyz = self.pixel_to_3d(u, v)
                 if xyz is None:
@@ -198,15 +198,16 @@ class ObjectDetection(Node):
                        for occ in self.occupied_pcl_centroids)
         ]
 
+        self.publish_cupholders(self.hough_centroids, method="hough")
+        fused_labeled = self.fuse_detections()
+        self.draw_fused_labels_on_image(annotated, fused_labeled, cam_frame)
+
         try:
             out = self.bridge.cv2_to_imgmsg(annotated, encoding="bgr8")
             out.header = msg.header
             self.annot_pub.publish(out)
         except Exception as exc:
             self.get_logger().warn(f"Failed to publish annotated image: {exc}")
-
-        self.publish_cupholders(self.hough_centroids, method="hough")
-        self.fuse_detections()
 
     def pixel_to_3d(self, u: int, v: int) -> Optional[Tuple[float, float, float]]:
         if self.K is None or self.last_depth is None:
@@ -656,9 +657,9 @@ class ObjectDetection(Node):
         return filtered_centroids, filtered_dims
 
     # ---------- Fusion ----------
-    def fuse_detections(self) -> None:
+    def fuse_detections(self) -> List[Tuple[int, List[float]]]:
         if not self.pc_centroids and not self.hough_centroids:
-            return
+            return []
 
         fused_centroids: List[List[float]] = []
 
@@ -684,7 +685,8 @@ class ObjectDetection(Node):
                         break
 
         if fused_centroids:
-            self.publish_cupholders(fused_centroids, method="fused")
+            return self.publish_cupholders(fused_centroids, method="fused")
+        return []
 
     # ---------- Publishing ----------
     def publish_tray(self, centroids: List[List[float]], dims: List[List[float]]) -> None:
@@ -729,11 +731,11 @@ class ObjectDetection(Node):
         centroids: List[List[float]],
         dims: Optional[List[List[float]]] = None,
         method: str = "fused",
-    ) -> None:
+    ) -> List[Tuple[int, List[float]]]:
         if not centroids:
             if method != "fused":
                 self.cupholder_marker_pub.publish(MarkerArray())
-            return
+            return []
 
         matched = self.match_detections_to_previous(centroids)
         matched = sorted(matched, key=lambda x: x[0])
@@ -798,14 +800,14 @@ class ObjectDetection(Node):
                 text_marker.scale.x = 0.05
                 text_marker.scale.y = 0.05
                 text_marker.scale.z = 0.05
-                text_marker.color.r = 1.0
-                text_marker.color.g = 1.0
+                text_marker.color.r = 0.0
+                text_marker.color.g = 0.0
                 text_marker.color.b = 1.0
                 text_marker.color.a = 1.0
                 marker_array.markers.append(text_marker)
 
                 det = DetectedObjects()
-                det.object_id = int(assigned_id + 1)  # Keep OMPL_PILZ one-based ids (ch_1, ch_2...)
+                det.object_id = int(assigned_id + 1)
                 det.position = Point(x=float(centroid[0]), y=float(centroid[1]), z=float(centroid[2]))
                 det.width = float(radius * 2.0)
                 det.thickness = float(radius * 2.0)
@@ -813,6 +815,79 @@ class ObjectDetection(Node):
                 self.cuph_detected_pub.publish(det)
 
         self.cupholder_marker_pub.publish(marker_array)
+        return matched
+
+    def draw_fused_labels_on_image(
+        self,
+        image: np.ndarray,
+        labeled_fused: List[Tuple[int, List[float]]],
+        cam_frame: str,
+    ) -> None:
+        if self.K is None or not labeled_fused:
+            return
+
+        fx, fy = float(self.K[0, 0]), float(self.K[1, 1])
+        cx, cy = float(self.K[0, 2]), float(self.K[1, 2])
+        h_img, w_img = image.shape[:2]
+
+        for assigned_id, centroid in labeled_fused:
+            point_in_cam = self.transform_point(
+                centroid[0], centroid[1], centroid[2], "base_link", cam_frame
+            )
+            if point_in_cam is None:
+                continue
+
+            x_c, y_c, z_c = point_in_cam
+            if z_c <= 1e-6:
+                continue
+
+            u = int(round((fx * x_c / z_c) + cx))
+            v = int(round((fy * y_c / z_c) + cy))
+            if not (0 <= u < w_img and 0 <= v < h_img):
+                continue
+
+            # Compact camera label for better readability in the image panel.
+            label = f"ch{assigned_id + 1}"
+            cv2.circle(image, (u, v), 4, (255, 0, 0), -1)
+            cv2.putText(
+                image,
+                label,
+                (u + 8, v - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 0, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+    def transform_point(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        source_frame: str,
+        target_frame: str,
+    ) -> Optional[Tuple[float, float, float]]:
+        ps = PointStamped()
+        ps.header.frame_id = source_frame
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.point.x = float(x)
+        ps.point.y = float(y)
+        ps.point.z = float(z)
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                target_frame,
+                source_frame,
+                rclpy.time.Time(),
+            )
+            ps_out = tf2_geometry_msgs.do_transform_point(ps, tf)
+            return (
+                float(ps_out.point.x),
+                float(ps_out.point.y),
+                float(ps_out.point.z),
+            )
+        except Exception:
+            return None
 
     @staticmethod
     def find_nearest_centroid_idx(
