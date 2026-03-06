@@ -54,6 +54,8 @@ OCCUPANCY_PTS_THRESH = 20
 
 # De-duplication
 MIN_CENTROID_DISTANCE = 0.05
+
+# Sim cup-holder detector parity (from -sim PCL pipeline)
 SIM_CLUSTER_TOLERANCE = 0.04
 SIM_MIN_CLUSTER_SIZE = 30
 SIM_MAX_CLUSTER_SIZE = 100000
@@ -61,6 +63,9 @@ SIM_OCCUPANCY_RADIUS_PAD = 0.01
 SIM_CUPHOLDER_OFFSET_X = -0.0055
 SIM_CUPHOLDER_OFFSET_Y = -0.013
 SIM_CUPHOLDER_OFFSET_Z = 0.01
+SIM_FUSION_WEIGHT_HOUGH = 0.3
+SIM_FUSION_WEIGHT_PCL = 0.7
+SIM_FUSION_MATCH_THRESHOLD = 0.03
 
 # Tray plane / ring refinement
 PLANE_RANSAC_ITERS = 120
@@ -84,6 +89,7 @@ CUP_HOLDER_FRAME_PREFIX = "ch_"
 class ObjectDetection(Node):
     """
     Cup-holder detector over wrist depth cloud.
+    Main cup-holder extraction path follows the -sim PCL logic:
       1) PointCloud2 -> base_link XYZ
       2) ROI filter
       3) Estimate tray top
@@ -204,9 +210,9 @@ class ObjectDetection(Node):
                 self.publish_tray([tray_center], [tray_dim])
                 return
 
-            # Sim-style cup-holder extraction (cluster + occupancy + offsets).
+            # Sim-style PCL cup-holder extraction (cluster + occupancy + offsets).
             if pcl is not None:
-                ch_centroids, ch_dims = self.detect_cupholders_sim_pcl(
+                pcl_centroids, pcl_dims = self.detect_cupholders_sim_pcl(
                     candidate_points=band,
                     reference_points=roi,
                 )
@@ -216,10 +222,24 @@ class ObjectDetection(Node):
                         "python-pcl not available. Using numpy fallback for cup-holder clustering."
                     )
                     self._logged_no_pcl_backend = True
-                ch_centroids, ch_dims = self.detect_cupholders_sim(
+                pcl_centroids, pcl_dims = self.detect_cupholders_sim(
                     candidate_points=band,
                     reference_points=roi,
                 )
+
+            # Hough-like branch from projected tray band (OpenCV), then fuse with PCL.
+            hough_centroids, hough_dims = self.detect_cupholders_opencv(
+                candidate_points=band,
+                reference_points=roi,
+                tray_center=tray_center,
+                tray_frame=tray_frame,
+            )
+            ch_centroids, ch_dims = self.fuse_cupholders(
+                pcl_centroids=pcl_centroids,
+                pcl_dims=pcl_dims,
+                hough_centroids=hough_centroids,
+                hough_dims=hough_dims,
+            )
 
             # Keep stable IDs ch_1..ch_n frame to frame
             ch_centroids, ch_dims = self.stable_order_holders(
@@ -709,10 +729,11 @@ class ObjectDetection(Node):
         reference_points: np.ndarray,
     ) -> Tuple[List[List[float]], List[List[float]]]:
         """
+        Port of the -sim cup-holder PCL branch to numpy:
         - Euclidean cluster extraction on below-tray points
         - radius/height gating
         - occupied-hole rejection from points above cluster
-        - fixed camera-pov offsets
+        - fixed camera-pov offsets used in -sim
         """
         if candidate_points.shape[0] < SIM_MIN_CLUSTER_SIZE:
             return [], []
@@ -736,6 +757,7 @@ class ObjectDetection(Node):
             radius = float(dimensions[0]) / 2.0
             height = float(dimensions[2])
 
+            # Match -sim occupied-cupholder rejection.
             radial = np.hypot(
                 reference_points[:, 0] - float(centroid[0]),
                 reference_points[:, 1] - float(centroid[1]),
@@ -747,11 +769,13 @@ class ObjectDetection(Node):
             if int(points_above) > OCCUPANCY_PTS_THRESH:
                 continue
 
+            # Match -sim cup-holder geometric gates.
             if not (CUP_MIN_RADIUS <= radius <= CUP_MAX_RADIUS):
                 continue
             if not (CUP_MIN_HEIGHT <= height <= CUP_MAX_HEIGHT):
                 continue
 
+            # Match -sim camera-pov compensation offsets.
             centroid_adj = np.asarray(centroid, dtype=float).copy()
             centroid_adj[0] += SIM_CUPHOLDER_OFFSET_X
             centroid_adj[1] += SIM_CUPHOLDER_OFFSET_Y
@@ -771,6 +795,75 @@ class ObjectDetection(Node):
         return self.filter_close_cupholders_with_dims(
             centroids, dimensions_list, MIN_CENTROID_DISTANCE
         )
+
+    def fuse_cupholders(
+        self,
+        pcl_centroids: List[List[float]],
+        pcl_dims: List[List[float]],
+        hough_centroids: List[List[float]],
+        hough_dims: List[List[float]],
+    ) -> Tuple[List[List[float]], List[List[float]]]:
+        """
+        Sim-style fusion:
+        - if only one branch has detections, use that branch
+        - if both have detections, weighted-average matched pairs within threshold
+        """
+        if not pcl_centroids and not hough_centroids:
+            return [], []
+        if not pcl_centroids:
+            return hough_centroids, hough_dims
+        if not hough_centroids:
+            return pcl_centroids, pcl_dims
+
+        fused_centroids: List[List[float]] = []
+        fused_dims: List[List[float]] = []
+        used_pcl = set()
+
+        w_h = float(SIM_FUSION_WEIGHT_HOUGH)
+        w_p = float(SIM_FUSION_WEIGHT_PCL)
+        threshold = float(SIM_FUSION_MATCH_THRESHOLD)
+
+        for h_i, h in enumerate(hough_centroids):
+            h_np = np.asarray(h, dtype=float)
+            best_j = -1
+            best_dist = float("inf")
+            for p_j, p in enumerate(pcl_centroids):
+                if p_j in used_pcl:
+                    continue
+                dist = float(np.linalg.norm(h_np - np.asarray(p, dtype=float)))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_j = p_j
+
+            if best_j < 0 or best_dist >= threshold:
+                continue
+
+            used_pcl.add(best_j)
+            p_np = np.asarray(pcl_centroids[best_j], dtype=float)
+            fused_c = (w_h * h_np) + (w_p * p_np)
+            fused_centroids.append(
+                [float(fused_c[0]), float(fused_c[1]), float(fused_c[2])]
+            )
+
+            if h_i < len(hough_dims) and best_j < len(pcl_dims):
+                h_d = np.asarray(hough_dims[h_i], dtype=float)
+                p_d = np.asarray(pcl_dims[best_j], dtype=float)
+                fd = (w_h * h_d) + (w_p * p_d)
+                fused_dims.append([float(fd[0]), float(fd[1]), float(fd[2])])
+            elif best_j < len(pcl_dims):
+                fused_dims.append(pcl_dims[best_j])
+            elif h_i < len(hough_dims):
+                fused_dims.append(hough_dims[h_i])
+            else:
+                fused_dims.append(
+                    [2.0 * CUP_MIN_RADIUS, 2.0 * CUP_MIN_RADIUS, CUP_MIN_HEIGHT]
+                )
+
+        # Pragmatic fallback: if branches disagree completely, keep PCL detections.
+        if not fused_centroids:
+            return pcl_centroids, pcl_dims
+
+        return fused_centroids, fused_dims
 
     def euclidean_cluster_indices(
         self,
