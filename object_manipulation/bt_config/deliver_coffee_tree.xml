@@ -3,128 +3,35 @@
   <BehaviorTree ID="DeliverCoffeeRoot">
     <ReactiveSequence name="DeliverCoffee">
       <GoalNotCanceled/>
-
-      <RetryUntilSuccessful num_attempts="2">
-        <Sequence name="DeliveryAttempt">
-          <GoalNotCanceled/>
-          <AcquireTarget/>
-
-          <Fallback name="PickWithRetryFromHome">
-            <Sequence name="PickPhase">
-              <Fallback name="PregraspWithRecovery">
-                <RetryUntilSuccessful num_attempts="3">
-                  <MovePregrasp/>
-                </RetryUntilSuccessful>
-                <Sequence>
-                  <GoSafePose/>
-                  <RetryUntilSuccessful num_attempts="1">
-                    <MovePregrasp/>
-                  </RetryUntilSuccessful>
-                </Sequence>
-              </Fallback>
-
-              <RetryUntilSuccessful num_attempts="2">
-                <OpenGripper/>
-              </RetryUntilSuccessful>
-
-              <Fallback name="ApproachWithRecovery">
-                <RetryUntilSuccessful num_attempts="2">
-                  <ApproachCup/>
-                </RetryUntilSuccessful>
-                <Sequence>
-                  <RetreatSmallZ/>
-                  <RetryUntilSuccessful num_attempts="2">
-                    <ApproachCup/>
-                  </RetryUntilSuccessful>
-                </Sequence>
-              </Fallback>
-
-              <RetryUntilSuccessful num_attempts="2">
-                <CloseGripper/>
-              </RetryUntilSuccessful>
-
-              <Fallback name="RetreatWithRecovery">
-                <RetryUntilSuccessful num_attempts="2">
-                  <RetreatWithCup/>
-                </RetryUntilSuccessful>
-                <Sequence>
-                  <GoSafePose/>
-                  <RetryUntilSuccessful num_attempts="1">
-                    <RetreatWithCup/>
-                  </RetryUntilSuccessful>
-                </Sequence>
-              </Fallback>
+      <Sequence name="MainSequence">
+        <Sequence name="CoffeeDelivery">
+          <ValidateDetection name="Validate Detection"/>
+          <PrePick name="Pre-pick"/>
+          <Pick/>
+          <Fallback name="PlaceOrRecover">
+            <Sequence name="TrytoPlace">
+              <PrePlace name="Pre-place"/>
+              <Place/>
             </Sequence>
-
-            <Sequence>
-              <GoSafePose/>
-              <FailAttempt/>
-            </Sequence>
+            <Inverter>
+              <PutBack name="Put Back"/>
+            </Inverter>
+            <Return/>
           </Fallback>
-
-          <Fallback name="PlaceSideWithPutbackRetry">
-            <Sequence name="PlaceSideCore">
-              <RetryUntilSuccessful num_attempts="3">
-                <RotateToPlace/>
-              </RetryUntilSuccessful>
-
-              <RetryUntilSuccessful num_attempts="3">
-                <MovePrePlace/>
-              </RetryUntilSuccessful>
-
-              <RetryUntilSuccessful num_attempts="2">
-                <InsertCup/>
-              </RetryUntilSuccessful>
-
-              <RetryUntilSuccessful num_attempts="2">
-                <ReleaseCup/>
-              </RetryUntilSuccessful>
-            </Sequence>
-
-            <Sequence>
-              <PutCupBackFixed/>
-              <GoSafePose/>
-              <FailAttempt/>
-            </Sequence>
-          </Fallback>
-
-          <Fallback name="PostPlaceRetreatWithRecovery">
-            <RetryUntilSuccessful num_attempts="3">
-              <PostPlaceRetreat/>
-            </RetryUntilSuccessful>
-            <Sequence>
-              <GoSafePose/>
-              <RetryUntilSuccessful num_attempts="1">
-                <PostPlaceRetreat/>
-              </RetryUntilSuccessful>
-            </Sequence>
-          </Fallback>
-
-          <RetryUntilSuccessful num_attempts="3">
-            <ReturnHome/>
-          </RetryUntilSuccessful>
         </Sequence>
-      </RetryUntilSuccessful>
+        <Return/>
+      </Sequence>
     </ReactiveSequence>
   </BehaviorTree>
 
   <TreeNodesModel>
     <Condition ID="GoalNotCanceled"/>
-    <Action ID="AcquireTarget"/>
-    <Action ID="MovePregrasp"/>
-    <Action ID="OpenGripper"/>
-    <Action ID="ApproachCup"/>
-    <Action ID="CloseGripper"/>
-    <Action ID="RetreatWithCup"/>
-    <Action ID="RotateToPlace"/>
-    <Action ID="MovePrePlace"/>
-    <Action ID="InsertCup"/>
-    <Action ID="ReleaseCup"/>
-    <Action ID="PostPlaceRetreat"/>
-    <Action ID="ReturnHome"/>
-    <Action ID="GoSafePose"/>
-    <Action ID="RetreatSmallZ"/>
-    <Action ID="PutCupBackFixed"/>
-    <Action ID="FailAttempt"/>
+    <Action ID="ValidateDetection"/>
+    <Action ID="PrePick"/>
+    <Action ID="Pick"/>
+    <Action ID="PrePlace"/>
+    <Action ID="Place"/>
+    <Action ID="PutBack"/>
+    <Action ID="Return"/>
   </TreeNodesModel>
 </root>

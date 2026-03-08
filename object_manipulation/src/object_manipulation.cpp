@@ -16,8 +16,8 @@
 
 #include <chrono>
 #include <cmath>
-#include <functional>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <memory>
 #include <mutex>
@@ -85,8 +85,8 @@ public:
       move_group_node_->declare_parameter<std::string>("ch", "ch_1");
     }
     if (!move_group_node_->has_parameter("bt_xml_path")) {
-      move_group_node_->declare_parameter<std::string>(
-          "bt_xml_path", default_bt_xml_path());
+      move_group_node_->declare_parameter<std::string>("bt_xml_path",
+                                                       default_bt_xml_path());
     }
     if (!move_group_node_->has_parameter("bt_enable_groot")) {
       move_group_node_->declare_parameter<bool>("bt_enable_groot", true);
@@ -205,6 +205,7 @@ public:
     active_holder_id_ = holder_id;
     bt_failure_reason_.clear();
     bt_goal_prepared_ = false;
+    bt_place_failed_ = false;
 
     halt_bt_tree();
     BT::NodeStatus status = BT::NodeStatus::RUNNING;
@@ -233,9 +234,7 @@ public:
     return false;
   }
 
-  BT::NodeStatus tick_bt_once() {
-    return bt_tree_.tickRoot();
-  }
+  BT::NodeStatus tick_bt_once() { return bt_tree_.tickRoot(); }
 
   void halt_bt_tree() {
     if (bt_tree_.rootNode()) {
@@ -289,6 +288,7 @@ private:
   uint32_t active_holder_id_{0};
   DetectedObject active_holder_;
   bool bt_goal_prepared_{false};
+  bool bt_place_failed_{false};
 
   double cup_x_{FIXED_CUP_X};
   double cup_y_{FIXED_CUP_Y};
@@ -332,7 +332,8 @@ private:
 
   static std::string default_bt_xml_path() {
     try {
-      return ament_index_cpp::get_package_share_directory("object_manipulation") +
+      return ament_index_cpp::get_package_share_directory(
+                 "object_manipulation") +
              DEFAULT_BT_XML_REL_PATH;
     } catch (const std::exception &) {
       return "deliver_coffee_tree.xml";
@@ -341,7 +342,8 @@ private:
 
   void setup_behavior_tree() {
     bt_xml_path_ = move_group_node_->get_parameter("bt_xml_path").as_string();
-    bt_enable_groot_ = move_group_node_->get_parameter("bt_enable_groot").as_bool();
+    bt_enable_groot_ =
+        move_group_node_->get_parameter("bt_enable_groot").as_bool();
 
     register_bt_nodes();
     load_behavior_tree(bt_xml_path_);
@@ -359,74 +361,75 @@ private:
 
   void register_bt_nodes() {
     bt_factory_.registerSimpleCondition(
-        "GoalNotCanceled", [this](BT::TreeNode & /*node*/) {
-          return bt_goal_not_canceled();
-        });
+        "GoalNotCanceled",
+        [this](BT::TreeNode & /*node*/) { return bt_goal_not_canceled(); });
 
-    bt_factory_.registerSimpleAction("AcquireTarget",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_acquire_target();
-                                     });
-    bt_factory_.registerSimpleAction("MovePregrasp",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_move_pregrasp();
-                                     });
-    bt_factory_.registerSimpleAction("OpenGripper",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_open_gripper();
-                                     });
-    bt_factory_.registerSimpleAction("ApproachCup",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_approach_cup();
-                                     });
-    bt_factory_.registerSimpleAction("CloseGripper",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_close_gripper();
-                                     });
-    bt_factory_.registerSimpleAction("RetreatWithCup",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_retreat_with_cup();
-                                     });
-    bt_factory_.registerSimpleAction("RotateToPlace",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_rotate_to_place();
-                                     });
-    bt_factory_.registerSimpleAction("MovePrePlace",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_move_pre_place();
-                                     });
-    bt_factory_.registerSimpleAction("InsertCup",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_insert_cup();
-                                     });
-    bt_factory_.registerSimpleAction("ReleaseCup",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_release_cup();
-                                     });
-    bt_factory_.registerSimpleAction("PostPlaceRetreat",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_post_place_retreat();
-                                     });
-    bt_factory_.registerSimpleAction("ReturnHome",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_return_home();
-                                     });
-    bt_factory_.registerSimpleAction("GoSafePose",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_go_safe_pose();
-                                     });
-    bt_factory_.registerSimpleAction("RetreatSmallZ",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_retreat_small_z();
-                                     });
-    bt_factory_.registerSimpleAction("PutCupBackFixed",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_put_cup_back_fixed();
-                                     });
-    bt_factory_.registerSimpleAction("FailAttempt",
-                                     [this](BT::TreeNode & /*node*/) {
-                                       return bt_force_failure();
-                                     });
+    // -sim style node IDs
+    bt_factory_.registerSimpleAction(
+        "ValidateDetection",
+        [this](BT::TreeNode & /*node*/) { return bt_validate_detection(); });
+    bt_factory_.registerSimpleAction(
+        "PrePick", [this](BT::TreeNode & /*node*/) { return bt_pre_pick(); });
+    bt_factory_.registerSimpleAction(
+        "Pick", [this](BT::TreeNode & /*node*/) { return bt_pick(); });
+    bt_factory_.registerSimpleAction(
+        "PrePlace", [this](BT::TreeNode & /*node*/) { return bt_pre_place(); });
+    bt_factory_.registerSimpleAction(
+        "Place", [this](BT::TreeNode & /*node*/) { return bt_place(); });
+    bt_factory_.registerSimpleAction(
+        "PutBack", [this](BT::TreeNode & /*node*/) { return bt_put_back(); });
+    bt_factory_.registerSimpleAction(
+        "Return", [this](BT::TreeNode & /*node*/) { return bt_return(); });
+
+    // Legacy node IDs kept for backward-compatible XMLs
+    bt_factory_.registerSimpleAction(
+        "AcquireTarget",
+        [this](BT::TreeNode & /*node*/) { return bt_acquire_target(); });
+    bt_factory_.registerSimpleAction(
+        "MovePregrasp",
+        [this](BT::TreeNode & /*node*/) { return bt_move_pregrasp(); });
+    bt_factory_.registerSimpleAction(
+        "OpenGripper",
+        [this](BT::TreeNode & /*node*/) { return bt_open_gripper(); });
+    bt_factory_.registerSimpleAction(
+        "ApproachCup",
+        [this](BT::TreeNode & /*node*/) { return bt_approach_cup(); });
+    bt_factory_.registerSimpleAction(
+        "CloseGripper",
+        [this](BT::TreeNode & /*node*/) { return bt_close_gripper(); });
+    bt_factory_.registerSimpleAction(
+        "RetreatWithCup",
+        [this](BT::TreeNode & /*node*/) { return bt_retreat_with_cup(); });
+    bt_factory_.registerSimpleAction(
+        "RotateToPlace",
+        [this](BT::TreeNode & /*node*/) { return bt_rotate_to_place(); });
+    bt_factory_.registerSimpleAction(
+        "MovePrePlace",
+        [this](BT::TreeNode & /*node*/) { return bt_move_pre_place(); });
+    bt_factory_.registerSimpleAction(
+        "InsertCup",
+        [this](BT::TreeNode & /*node*/) { return bt_insert_cup(); });
+    bt_factory_.registerSimpleAction(
+        "ReleaseCup",
+        [this](BT::TreeNode & /*node*/) { return bt_release_cup(); });
+    bt_factory_.registerSimpleAction(
+        "PostPlaceRetreat",
+        [this](BT::TreeNode & /*node*/) { return bt_post_place_retreat(); });
+    bt_factory_.registerSimpleAction(
+        "ReturnHome",
+        [this](BT::TreeNode & /*node*/) { return bt_return_home(); });
+    bt_factory_.registerSimpleAction(
+        "GoSafePose",
+        [this](BT::TreeNode & /*node*/) { return bt_go_safe_pose(); });
+    bt_factory_.registerSimpleAction(
+        "RetreatSmallZ",
+        [this](BT::TreeNode & /*node*/) { return bt_retreat_small_z(); });
+    bt_factory_.registerSimpleAction(
+        "PutCupBackFixed",
+        [this](BT::TreeNode & /*node*/) { return bt_put_cup_back_fixed(); });
+    bt_factory_.registerSimpleAction(
+        "FailAttempt",
+        [this](BT::TreeNode & /*node*/) { return bt_force_failure(); });
   }
 
   void load_behavior_tree(const std::string &xml_path) {
@@ -449,6 +452,68 @@ private:
   BT::NodeStatus bt_goal_not_canceled() {
     if (is_cancel_requested(active_goal_handle_)) {
       return bt_fail("Goal canceled");
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_validate_detection() {
+    bt_place_failed_ = false;
+    return bt_acquire_target();
+  }
+
+  BT::NodeStatus bt_pre_pick() { return bt_move_pregrasp(); }
+
+  BT::NodeStatus bt_pick() {
+    if (bt_open_gripper() != BT::NodeStatus::SUCCESS) {
+      return BT::NodeStatus::FAILURE;
+    }
+    if (bt_approach_cup() != BT::NodeStatus::SUCCESS) {
+      return BT::NodeStatus::FAILURE;
+    }
+    if (bt_close_gripper() != BT::NodeStatus::SUCCESS) {
+      return BT::NodeStatus::FAILURE;
+    }
+    if (bt_retreat_with_cup() != BT::NodeStatus::SUCCESS) {
+      return BT::NodeStatus::FAILURE;
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_pre_place() {
+    if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
+      return BT::NodeStatus::FAILURE;
+    }
+    if (bt_move_pre_place() != BT::NodeStatus::SUCCESS) {
+      return BT::NodeStatus::FAILURE;
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_place() {
+    if (bt_insert_cup() != BT::NodeStatus::SUCCESS) {
+      return BT::NodeStatus::FAILURE;
+    }
+    if (bt_release_cup() != BT::NodeStatus::SUCCESS) {
+      return BT::NodeStatus::FAILURE;
+    }
+    if (bt_post_place_retreat() != BT::NodeStatus::SUCCESS) {
+      return BT::NodeStatus::FAILURE;
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_put_back() {
+    bt_place_failed_ = true;
+    return bt_put_cup_back_fixed();
+  }
+
+  BT::NodeStatus bt_return() {
+    const auto status = bt_return_home();
+    if (status != BT::NodeStatus::SUCCESS) {
+      return status;
+    }
+    if (bt_place_failed_) {
+      return bt_fail("Place failed: cup was put back to fixed pick position.");
     }
     return BT::NodeStatus::SUCCESS;
   }
@@ -486,10 +551,10 @@ private:
                 active_holder_.position.y, active_holder_.position.z,
                 active_holder_.width, active_holder_.height,
                 active_holder_.thickness);
-    RCLCPP_INFO(
-        LOGGER, "[PLACE_DIAG] Target cupholder id=%u pose=(%.4f, %.4f, %.4f)",
-        active_holder_.object_id, active_holder_.position.x,
-        active_holder_.position.y, active_holder_.position.z);
+    RCLCPP_INFO(LOGGER,
+                "[PLACE_DIAG] Target cupholder id=%u pose=(%.4f, %.4f, %.4f)",
+                active_holder_.object_id, active_holder_.position.x,
+                active_holder_.position.y, active_holder_.position.z);
     RCLCPP_INFO(LOGGER, "Using fixed cup pose at (%.3f, %.3f, %.3f)", cup_x_,
                 cup_y_, cup_z_);
     RCLCPP_INFO(LOGGER, "Planning and Executing Pick And Place Perception...");
@@ -579,12 +644,11 @@ private:
     current_state_robot_ = move_group_robot_->getCurrentState(10);
     current_state_robot_->copyJointGroupPositions(joint_model_group_robot_,
                                                   joint_group_positions_robot_);
-    setup_joint_value_target(joint_group_positions_robot_[0] + 2.0 * M_PI / 3.0,
-                             joint_group_positions_robot_[1],
-                             joint_group_positions_robot_[2],
-                             joint_group_positions_robot_[3],
-                             joint_group_positions_robot_[4],
-                             joint_group_positions_robot_[5]);
+    setup_joint_value_target(
+        joint_group_positions_robot_[0] + 2.0 * M_PI / 3.0,
+        joint_group_positions_robot_[1], joint_group_positions_robot_[2],
+        joint_group_positions_robot_[3], joint_group_positions_robot_[4],
+        joint_group_positions_robot_[5]);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
       return bt_fail("Failed shoulder rotation");
@@ -595,7 +659,8 @@ private:
   }
 
   BT::NodeStatus bt_move_pre_place() {
-    publish_feedback(active_goal_handle_, "pre_place", 0.72f, active_holder_id_);
+    publish_feedback(active_goal_handle_, "pre_place", 0.72f,
+                     active_holder_id_);
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
                 place_x_, place_y_, place_z_ + PREGRASP_Z_OFFSET + 0.066);
     setup_goal_pose_target(place_x_, place_y_,
@@ -611,7 +676,8 @@ private:
   }
 
   BT::NodeStatus bt_insert_cup() {
-    publish_feedback(active_goal_handle_, "insert_cup", 0.82f, active_holder_id_);
+    publish_feedback(active_goal_handle_, "insert_cup", 0.82f,
+                     active_holder_id_);
     RCLCPP_INFO(LOGGER,
                 "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
                 place_x_, place_y_,
@@ -621,14 +687,16 @@ private:
     if (!execute_trajectory_cartesian()) {
       return bt_fail("Failed Cartesian insert to cupholder");
     }
-    log_xy_error_to_holder("after_insert_cartesian", place_x_, place_y_, place_z_);
+    log_xy_error_to_holder("after_insert_cartesian", place_x_, place_y_,
+                           place_z_);
     publish_feedback(active_goal_handle_, "cup_inserted", 0.84f,
                      active_holder_id_);
     return BT::NodeStatus::SUCCESS;
   }
 
   BT::NodeStatus bt_release_cup() {
-    publish_feedback(active_goal_handle_, "release_cup", 0.88f, active_holder_id_);
+    publish_feedback(active_goal_handle_, "release_cup", 0.88f,
+                     active_holder_id_);
     RCLCPP_INFO(LOGGER, "Opening Gripper...");
     setup_named_pose_gripper("open");
     plan_trajectory_gripper();
@@ -658,7 +726,8 @@ private:
   }
 
   BT::NodeStatus bt_return_home() {
-    publish_feedback(active_goal_handle_, "return_home", 0.98f, active_holder_id_);
+    publish_feedback(active_goal_handle_, "return_home", 0.98f,
+                     active_holder_id_);
     RCLCPP_INFO(LOGGER, "Going to Initial Position...");
     setup_joint_value_target(+0.0000, -1.5708, +0.0000, -1.5708, +0.0000,
                              +0.0000);
@@ -727,7 +796,8 @@ private:
     setup_waypoints_target(+0.000, +0.000, +APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
-      RCLCPP_WARN(LOGGER, "BT rotate recovery: failed retreating after put-back.");
+      RCLCPP_WARN(LOGGER,
+                  "BT rotate recovery: failed retreating after put-back.");
     }
 
     return BT::NodeStatus::SUCCESS;
