@@ -8,6 +8,8 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
+find_package(behaviortree_cpp_v3 REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(moveit_core REQUIRED)
@@ -30,6 +32,8 @@ ament_target_dependencies(add_coffee_scene
 
 ament_target_dependencies(object_manipulation
     ament_cmake
+    ament_index_cpp
+    behaviortree_cpp_v3
     rclcpp
     rclcpp_action
     moveit_core
@@ -44,7 +48,7 @@ install(TARGETS object_manipulation add_coffee_scene
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch
+install(DIRECTORY launch bt_config
   DESTINATION share/${PROJECT_NAME}
 )
 

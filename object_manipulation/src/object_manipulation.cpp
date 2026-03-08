@@ -1,6 +1,9 @@
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <behaviortree_cpp_v3/bt_factory.h>
+#include <behaviortree_cpp_v3/loggers/bt_zmq_publisher.h>
 #include <custom_msgs/action/deliver_coffee.hpp>
 #include <custom_msgs/msg/detected_objects.hpp>
 #include <moveit_msgs/msg/display_robot_state.hpp>
@@ -14,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <fstream>
 #include <iomanip>
 #include <memory>
 #include <mutex>
@@ -34,6 +38,8 @@ static const std::string DELIVER_COFFEE_ACTION = "deliver_coffee";
 static const std::string OMPL_PIPELINE = "ompl";
 static const std::string PILZ_PIPELINE = "pilz_industrial_motion_planner";
 static const std::string PILZ_LIN = "LIN";
+static const std::string DEFAULT_BT_XML_REL_PATH =
+    "/bt_config/deliver_coffee_tree.xml";
 
 // offsets / “magic numbers”:
 static constexpr double PREGRASP_Z_OFFSET = 0.20; // 20 cm above detected object
@@ -77,6 +83,13 @@ public:
     }
     if (!move_group_node_->has_parameter("ch")) {
       move_group_node_->declare_parameter<std::string>("ch", "ch_1");
+    }
+    if (!move_group_node_->has_parameter("bt_xml_path")) {
+      move_group_node_->declare_parameter<std::string>(
+          "bt_xml_path", default_bt_xml_path());
+    }
+    if (!move_group_node_->has_parameter("bt_enable_groot")) {
+      move_group_node_->declare_parameter<bool>("bt_enable_groot", true);
     }
     const auto ch = move_group_node_->get_parameter("ch").as_string();
     target_holder_id_ = parse_ch_to_id(ch);
@@ -140,6 +153,7 @@ public:
                   std::placeholders::_1),
         std::bind(&PickAndPlacePerception::handle_accepted, this,
                   std::placeholders::_1));
+    setup_behavior_tree();
 
     // print out basic system information
     RCLCPP_INFO(LOGGER, "Planning Frame: %s",
@@ -182,251 +196,51 @@ public:
       uint32_t holder_id,
       const std::shared_ptr<GoalHandleDeliverCoffee> &goal_handle,
       std::string &failure_reason) {
-    publish_feedback(goal_handle, "waiting_for_target_cupholder", 0.02f,
-                     holder_id);
-
-    DetectedObject holder;
-    if (!wait_for_cupholder(holder_id, holder, std::chrono::seconds(30))) {
-      failure_reason = "Timed out waiting for requested cupholder detection";
+    if (!bt_tree_ready_) {
+      failure_reason = "Behavior tree not initialized";
       return false;
     }
 
-    if (is_cancel_requested(goal_handle)) {
+    active_goal_handle_ = goal_handle;
+    active_holder_id_ = holder_id;
+    bt_failure_reason_.clear();
+    bt_goal_prepared_ = false;
+
+    halt_bt_tree();
+    BT::NodeStatus status = BT::NodeStatus::RUNNING;
+    while (rclcpp::ok() && status == BT::NodeStatus::RUNNING) {
+      status = tick_bt_once();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    halt_bt_tree();
+
+    if (status == BT::NodeStatus::SUCCESS) {
+      active_goal_handle_.reset();
+      RCLCPP_INFO(LOGGER, "Pick And Place Perception Execution Complete");
+      return true;
+    }
+
+    if (is_cancel_requested(goal_handle) ||
+        bt_failure_reason_ == "Goal canceled") {
       failure_reason = "Goal canceled";
+      active_goal_handle_.reset();
       return false;
     }
 
-    RCLCPP_INFO(LOGGER,
-                "Using cupholder id=%u pose=(%.3f, %.3f, %.3f) w=%.3f h=%.3f "
-                "t=%.3f",
-                holder.object_id, holder.position.x, holder.position.y,
-                holder.position.z, holder.width, holder.height,
-                holder.thickness);
-    RCLCPP_INFO(LOGGER,
-                "[PLACE_DIAG] Target cupholder id=%u pose=(%.4f, %.4f, %.4f)",
-                holder.object_id, holder.position.x, holder.position.y,
-                holder.position.z);
+    failure_reason = bt_failure_reason_.empty() ? "Behavior tree failed"
+                                                : bt_failure_reason_;
+    active_goal_handle_.reset();
+    return false;
+  }
 
-    const double cup_x = move_group_node_->get_parameter("cup_x").as_double();
-    const double cup_y = move_group_node_->get_parameter("cup_y").as_double();
-    const double cup_z = move_group_node_->get_parameter("cup_z").as_double();
+  BT::NodeStatus tick_bt_once() {
+    return bt_tree_.tickRoot();
+  }
 
-    const double pre_x = cup_x;
-    const double pre_y = cup_y;
-    const double pre_z = cup_z + PREGRASP_Z_OFFSET;
-    // const double place_x = holder.position.x - 0.005;
-    // const double place_y = holder.position.y + 0.014;
-    const double place_x = holder.position.x;
-    const double place_y = holder.position.y;
-    const double place_z = holder.position.z;
-
-    RCLCPP_INFO(LOGGER, "Using fixed cup pose at (%.3f, %.3f, %.3f)", cup_x,
-                cup_y, cup_z);
-    RCLCPP_INFO(LOGGER, "Planning and Executing Pick And Place Perception...");
-    publish_feedback(goal_handle, "start_delivery", 0.05f, holder_id);
-
-    // 1. go to pregrasp
-    RCLCPP_INFO(LOGGER, "Going to Pregrasp Position (%.3f, %.3f, %.3f)...",
-                pre_x, pre_y, pre_z);
-    setup_goal_pose_target(pre_x, pre_y, pre_z, -1.000, +0.000, +0.000, +0.000);
-    plan_trajectory_kinematics();
-    if (!execute_trajectory_kinematics()) {
-      failure_reason = "Failed pregrasp kinematics";
-      return false;
+  void halt_bt_tree() {
+    if (bt_tree_.rootNode()) {
+      bt_tree_.rootNode()->halt();
     }
-    publish_feedback(goal_handle, "pregrasp_reached", 0.12f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 2. open the gripper
-    RCLCPP_INFO(LOGGER, "Opening Gripper...");
-    setup_named_pose_gripper("open");
-    plan_trajectory_gripper();
-    if (!execute_trajectory_gripper()) {
-      failure_reason = "Failed to open gripper";
-      return false;
-    }
-    publish_feedback(goal_handle, "gripper_open", 0.20f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 3. approach straight down
-    RCLCPP_INFO(LOGGER, "Approaching object...");
-    setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
-    plan_trajectory_cartesian();
-    if (!execute_trajectory_cartesian()) {
-      failure_reason = "Failed Cartesian approach to cup";
-      return false;
-    }
-    publish_feedback(goal_handle, "approached_cup", 0.32f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 4. close the gripper
-    log_xy_error_to_point("before_grasp_close", cup_x, cup_y, cup_z);
-    RCLCPP_INFO(LOGGER, "Closing Gripper...");
-    setup_named_pose_gripper("close");
-    plan_trajectory_gripper();
-    if (!execute_trajectory_gripper()) {
-      failure_reason = "Failed to close gripper";
-      return false;
-    }
-    publish_feedback(goal_handle, "gripper_closed", 0.42f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 5. retreat
-    RCLCPP_INFO(LOGGER, "Retreating...");
-    setup_waypoints_target(+0.000, +0.000, 5 * APPROACH_Z_DELTA);
-    plan_trajectory_cartesian();
-    if (!execute_trajectory_cartesian()) {
-      failure_reason = "Failed Cartesian retreat";
-      return false;
-    }
-    publish_feedback(goal_handle, "retreated_with_cup", 0.50f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 6. rotate shoulder
-    RCLCPP_INFO(LOGGER, "Rotate Shoulder Joint 120 degrees...");
-    current_state_robot_ = move_group_robot_->getCurrentState(10);
-    current_state_robot_->copyJointGroupPositions(joint_model_group_robot_,
-                                                  joint_group_positions_robot_);
-    setup_joint_value_target(
-        joint_group_positions_robot_[0] + 2.0 * M_PI / 3.0, // add 120 degrees
-        joint_group_positions_robot_[1], joint_group_positions_robot_[2],
-        joint_group_positions_robot_[3], joint_group_positions_robot_[4],
-        joint_group_positions_robot_[5]);
-    plan_trajectory_kinematics();
-    if (!execute_trajectory_kinematics()) {
-      failure_reason = "Failed shoulder rotation";
-      return false;
-    }
-    publish_feedback(goal_handle, "rotated_to_place_side", 0.62f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 7. go to pre-place position (from detected cupholder)
-    RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z + PREGRASP_Z_OFFSET + 0.066);
-    setup_goal_pose_target(place_x, place_y,
-                           place_z + PREGRASP_Z_OFFSET + 0.066, -1.000, +0.000,
-                           +0.000, +0.000);
-    plan_trajectory_kinematics();
-    if (!execute_trajectory_kinematics()) {
-      failure_reason = "Failed pre-place kinematics";
-      return false;
-    }
-    publish_feedback(goal_handle, "pre_place_reached", 0.74f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 9. approach down to cupholder center
-    RCLCPP_INFO(LOGGER,
-                "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
-                place_x, place_y,
-                place_z + PREGRASP_Z_OFFSET + 0.066 - APPROACH_Z_DELTA);
-    setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
-    plan_trajectory_cartesian();
-    if (!execute_trajectory_cartesian()) {
-      failure_reason = "Failed Cartesian insert to cupholder";
-      return false;
-    }
-    log_xy_error_to_holder("after_insert_cartesian", place_x, place_y, place_z);
-    publish_feedback(goal_handle, "cup_inserted", 0.84f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 10. open the gripper
-    RCLCPP_INFO(LOGGER, "Opening Gripper...");
-    setup_named_pose_gripper("open");
-    plan_trajectory_gripper();
-    if (!execute_trajectory_gripper()) {
-      failure_reason = "Failed to release cup";
-      return false;
-    }
-    publish_feedback(goal_handle, "cup_released", 0.90f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 11. retreat from cupholder center
-    RCLCPP_INFO(LOGGER,
-                "Going to Pre-place Position Again (%.3f, %.3f, %.3f)...",
-                place_x, place_y, place_z + 3 * PREGRASP_Z_OFFSET);
-    setup_goal_pose_target(place_x, place_y, place_z + 3 * PREGRASP_Z_OFFSET,
-                           -1.000, +0.000, +0.000, +0.000);
-    plan_trajectory_kinematics();
-    if (!execute_trajectory_kinematics()) {
-      failure_reason = "Failed post-place retreat";
-      return false;
-    }
-    publish_feedback(goal_handle, "post_place_retreat", 0.95f, holder_id);
-
-    // wait for few seconds
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    if (is_cancel_requested(goal_handle)) {
-      failure_reason = "Goal canceled";
-      return false;
-    }
-
-    // 12. Going to Initial Position
-    RCLCPP_INFO(LOGGER, "Going to Initial Position...");
-    setup_joint_value_target(+0.0000, -1.5708, +0.0000, -1.5708, +0.0000,
-                             +0.0000);
-    plan_trajectory_kinematics();
-    if (!execute_trajectory_kinematics()) {
-      failure_reason = "Failed return to initial pose";
-      return false;
-    }
-    publish_feedback(goal_handle, "returned_home", 1.0f, holder_id);
-
-    RCLCPP_INFO(LOGGER, "Pick And Place Perception Execution Complete");
-    return true;
   }
 
 private:
@@ -464,6 +278,28 @@ private:
   bool plan_success_cartesian_{false};
 
   int target_holder_id_{1};
+  std::string bt_xml_path_;
+  bool bt_enable_groot_{true};
+  BT::BehaviorTreeFactory bt_factory_;
+  BT::Tree bt_tree_;
+  std::unique_ptr<BT::PublisherZMQ> bt_groot_publisher_;
+  bool bt_tree_ready_{false};
+  std::string bt_failure_reason_;
+  std::shared_ptr<GoalHandleDeliverCoffee> active_goal_handle_;
+  uint32_t active_holder_id_{0};
+  DetectedObject active_holder_;
+  bool bt_goal_prepared_{false};
+
+  double cup_x_{FIXED_CUP_X};
+  double cup_y_{FIXED_CUP_Y};
+  double cup_z_{FIXED_CUP_Z};
+  double pre_x_{FIXED_CUP_X};
+  double pre_y_{FIXED_CUP_Y};
+  double pre_z_{FIXED_CUP_Z + PREGRASP_Z_OFFSET};
+  double place_x_{0.0};
+  double place_y_{0.0};
+  double place_z_{0.0};
+
   rclcpp::Subscription<DetectedObject>::SharedPtr cupholder_sub_;
   rclcpp_action::Server<DeliverCoffee>::SharedPtr action_server_;
   std::mutex cupholder_mutex_;
@@ -492,6 +328,415 @@ private:
     } catch (...) {
       return 1;
     }
+  }
+
+  static std::string default_bt_xml_path() {
+    try {
+      return ament_index_cpp::get_package_share_directory("object_manipulation") +
+             DEFAULT_BT_XML_REL_PATH;
+    } catch (const std::exception &) {
+      return "deliver_coffee_tree.xml";
+    }
+  }
+
+  void setup_behavior_tree() {
+    bt_xml_path_ = move_group_node_->get_parameter("bt_xml_path").as_string();
+    bt_enable_groot_ = move_group_node_->get_parameter("bt_enable_groot").as_bool();
+
+    register_bt_nodes();
+    load_behavior_tree(bt_xml_path_);
+
+    if (bt_enable_groot_) {
+      try {
+        bt_groot_publisher_ = std::make_unique<BT::PublisherZMQ>(bt_tree_);
+        RCLCPP_INFO(LOGGER,
+                    "Groot (ZMQ) publisher enabled for DeliverCoffee BT.");
+      } catch (const std::exception &e) {
+        RCLCPP_WARN(LOGGER, "Failed to enable Groot publisher: %s", e.what());
+      }
+    }
+  }
+
+  void register_bt_nodes() {
+    bt_factory_.registerSimpleCondition(
+        "GoalNotCanceled", [this](BT::TreeNode & /*node*/) {
+          return bt_goal_not_canceled();
+        });
+
+    bt_factory_.registerSimpleAction("AcquireTarget",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_acquire_target();
+                                     });
+    bt_factory_.registerSimpleAction("MovePregrasp",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_move_pregrasp();
+                                     });
+    bt_factory_.registerSimpleAction("OpenGripper",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_open_gripper();
+                                     });
+    bt_factory_.registerSimpleAction("ApproachCup",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_approach_cup();
+                                     });
+    bt_factory_.registerSimpleAction("CloseGripper",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_close_gripper();
+                                     });
+    bt_factory_.registerSimpleAction("RetreatWithCup",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_retreat_with_cup();
+                                     });
+    bt_factory_.registerSimpleAction("RotateToPlace",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_rotate_to_place();
+                                     });
+    bt_factory_.registerSimpleAction("MovePrePlace",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_move_pre_place();
+                                     });
+    bt_factory_.registerSimpleAction("InsertCup",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_insert_cup();
+                                     });
+    bt_factory_.registerSimpleAction("ReleaseCup",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_release_cup();
+                                     });
+    bt_factory_.registerSimpleAction("PostPlaceRetreat",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_post_place_retreat();
+                                     });
+    bt_factory_.registerSimpleAction("ReturnHome",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_return_home();
+                                     });
+    bt_factory_.registerSimpleAction("GoSafePose",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_go_safe_pose();
+                                     });
+    bt_factory_.registerSimpleAction("RetreatSmallZ",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_retreat_small_z();
+                                     });
+    bt_factory_.registerSimpleAction("PutCupBackFixed",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_put_cup_back_fixed();
+                                     });
+    bt_factory_.registerSimpleAction("FailAttempt",
+                                     [this](BT::TreeNode & /*node*/) {
+                                       return bt_force_failure();
+                                     });
+  }
+
+  void load_behavior_tree(const std::string &xml_path) {
+    std::ifstream ifs(xml_path);
+    if (!ifs.good()) {
+      throw std::runtime_error("Behavior tree XML not found at: " + xml_path);
+    }
+
+    bt_tree_ = bt_factory_.createTreeFromFile(xml_path);
+    bt_tree_ready_ = true;
+    RCLCPP_INFO(LOGGER, "Loaded DeliverCoffee BT XML: %s", xml_path.c_str());
+  }
+
+  BT::NodeStatus bt_fail(const std::string &reason) {
+    bt_failure_reason_ = reason;
+    RCLCPP_ERROR(LOGGER, "%s", reason.c_str());
+    return BT::NodeStatus::FAILURE;
+  }
+
+  BT::NodeStatus bt_goal_not_canceled() {
+    if (is_cancel_requested(active_goal_handle_)) {
+      return bt_fail("Goal canceled");
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_acquire_target() {
+    if (bt_goal_prepared_) {
+      return BT::NodeStatus::SUCCESS;
+    }
+
+    publish_feedback(active_goal_handle_, "waiting_for_target_cupholder", 0.02f,
+                     active_holder_id_);
+    if (!wait_for_cupholder(active_holder_id_, active_holder_,
+                            std::chrono::seconds(30), active_goal_handle_)) {
+      if (is_cancel_requested(active_goal_handle_)) {
+        return bt_fail("Goal canceled");
+      }
+      return bt_fail("Timed out waiting for requested cupholder detection");
+    }
+
+    place_x_ = active_holder_.position.x;
+    place_y_ = active_holder_.position.y;
+    place_z_ = active_holder_.position.z;
+
+    cup_x_ = move_group_node_->get_parameter("cup_x").as_double();
+    cup_y_ = move_group_node_->get_parameter("cup_y").as_double();
+    cup_z_ = move_group_node_->get_parameter("cup_z").as_double();
+    pre_x_ = cup_x_;
+    pre_y_ = cup_y_;
+    pre_z_ = cup_z_ + PREGRASP_Z_OFFSET;
+
+    RCLCPP_INFO(LOGGER,
+                "Using cupholder id=%u pose=(%.3f, %.3f, %.3f) w=%.3f h=%.3f "
+                "t=%.3f",
+                active_holder_.object_id, active_holder_.position.x,
+                active_holder_.position.y, active_holder_.position.z,
+                active_holder_.width, active_holder_.height,
+                active_holder_.thickness);
+    RCLCPP_INFO(
+        LOGGER, "[PLACE_DIAG] Target cupholder id=%u pose=(%.4f, %.4f, %.4f)",
+        active_holder_.object_id, active_holder_.position.x,
+        active_holder_.position.y, active_holder_.position.z);
+    RCLCPP_INFO(LOGGER, "Using fixed cup pose at (%.3f, %.3f, %.3f)", cup_x_,
+                cup_y_, cup_z_);
+    RCLCPP_INFO(LOGGER, "Planning and Executing Pick And Place Perception...");
+    publish_feedback(active_goal_handle_, "start_delivery", 0.05f,
+                     active_holder_id_);
+
+    bt_goal_prepared_ = true;
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_move_pregrasp() {
+    publish_feedback(active_goal_handle_, "pregrasp", 0.10f, active_holder_id_);
+    RCLCPP_INFO(LOGGER, "Going to Pregrasp Position (%.3f, %.3f, %.3f)...",
+                pre_x_, pre_y_, pre_z_);
+    setup_goal_pose_target(pre_x_, pre_y_, pre_z_, -1.000, +0.000, +0.000,
+                           +0.000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return bt_fail("Failed pregrasp kinematics");
+    }
+    publish_feedback(active_goal_handle_, "pregrasp_reached", 0.12f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_open_gripper() {
+    publish_feedback(active_goal_handle_, "open_gripper", 0.18f,
+                     active_holder_id_);
+    RCLCPP_INFO(LOGGER, "Opening Gripper...");
+    setup_named_pose_gripper("open");
+    plan_trajectory_gripper();
+    if (!execute_trajectory_gripper()) {
+      return bt_fail("Failed to open gripper");
+    }
+    publish_feedback(active_goal_handle_, "gripper_open", 0.20f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_approach_cup() {
+    publish_feedback(active_goal_handle_, "approach_cup", 0.30f,
+                     active_holder_id_);
+    RCLCPP_INFO(LOGGER, "Approaching object...");
+    setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      return bt_fail("Failed Cartesian approach to cup");
+    }
+    publish_feedback(active_goal_handle_, "approached_cup", 0.32f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_close_gripper() {
+    publish_feedback(active_goal_handle_, "close_gripper", 0.40f,
+                     active_holder_id_);
+    log_xy_error_to_point("before_grasp_close", cup_x_, cup_y_, cup_z_);
+    RCLCPP_INFO(LOGGER, "Closing Gripper...");
+    setup_named_pose_gripper("close");
+    plan_trajectory_gripper();
+    if (!execute_trajectory_gripper()) {
+      return bt_fail("Failed to close gripper");
+    }
+    publish_feedback(active_goal_handle_, "gripper_closed", 0.42f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_retreat_with_cup() {
+    publish_feedback(active_goal_handle_, "retreat_with_cup", 0.50f,
+                     active_holder_id_);
+    RCLCPP_INFO(LOGGER, "Retreating...");
+    setup_waypoints_target(+0.000, +0.000, 5 * APPROACH_Z_DELTA);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      return bt_fail("Failed Cartesian retreat");
+    }
+    publish_feedback(active_goal_handle_, "retreated_with_cup", 0.52f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_rotate_to_place() {
+    publish_feedback(active_goal_handle_, "rotate_to_place", 0.60f,
+                     active_holder_id_);
+    RCLCPP_INFO(LOGGER, "Rotate Shoulder Joint 120 degrees...");
+    current_state_robot_ = move_group_robot_->getCurrentState(10);
+    current_state_robot_->copyJointGroupPositions(joint_model_group_robot_,
+                                                  joint_group_positions_robot_);
+    setup_joint_value_target(joint_group_positions_robot_[0] + 2.0 * M_PI / 3.0,
+                             joint_group_positions_robot_[1],
+                             joint_group_positions_robot_[2],
+                             joint_group_positions_robot_[3],
+                             joint_group_positions_robot_[4],
+                             joint_group_positions_robot_[5]);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return bt_fail("Failed shoulder rotation");
+    }
+    publish_feedback(active_goal_handle_, "rotated_to_place_side", 0.62f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_move_pre_place() {
+    publish_feedback(active_goal_handle_, "pre_place", 0.72f, active_holder_id_);
+    RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
+                place_x_, place_y_, place_z_ + PREGRASP_Z_OFFSET + 0.066);
+    setup_goal_pose_target(place_x_, place_y_,
+                           place_z_ + PREGRASP_Z_OFFSET + 0.066, -1.000, +0.000,
+                           +0.000, +0.000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return bt_fail("Failed pre-place kinematics");
+    }
+    publish_feedback(active_goal_handle_, "pre_place_reached", 0.74f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_insert_cup() {
+    publish_feedback(active_goal_handle_, "insert_cup", 0.82f, active_holder_id_);
+    RCLCPP_INFO(LOGGER,
+                "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
+                place_x_, place_y_,
+                place_z_ + PREGRASP_Z_OFFSET + 0.066 - APPROACH_Z_DELTA);
+    setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      return bt_fail("Failed Cartesian insert to cupholder");
+    }
+    log_xy_error_to_holder("after_insert_cartesian", place_x_, place_y_, place_z_);
+    publish_feedback(active_goal_handle_, "cup_inserted", 0.84f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_release_cup() {
+    publish_feedback(active_goal_handle_, "release_cup", 0.88f, active_holder_id_);
+    RCLCPP_INFO(LOGGER, "Opening Gripper...");
+    setup_named_pose_gripper("open");
+    plan_trajectory_gripper();
+    if (!execute_trajectory_gripper()) {
+      return bt_fail("Failed to release cup");
+    }
+    publish_feedback(active_goal_handle_, "cup_released", 0.90f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_post_place_retreat() {
+    publish_feedback(active_goal_handle_, "post_place_retreat", 0.94f,
+                     active_holder_id_);
+    RCLCPP_INFO(LOGGER,
+                "Going to Pre-place Position Again (%.3f, %.3f, %.3f)...",
+                place_x_, place_y_, place_z_ + 3 * PREGRASP_Z_OFFSET);
+    setup_goal_pose_target(place_x_, place_y_, place_z_ + 3 * PREGRASP_Z_OFFSET,
+                           -1.000, +0.000, +0.000, +0.000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return bt_fail("Failed post-place retreat");
+    }
+    publish_feedback(active_goal_handle_, "post_place_retreat_done", 0.95f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_return_home() {
+    publish_feedback(active_goal_handle_, "return_home", 0.98f, active_holder_id_);
+    RCLCPP_INFO(LOGGER, "Going to Initial Position...");
+    setup_joint_value_target(+0.0000, -1.5708, +0.0000, -1.5708, +0.0000,
+                             +0.0000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return bt_fail("Failed return to initial pose");
+    }
+    publish_feedback(active_goal_handle_, "returned_home", 1.0f,
+                     active_holder_id_);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_go_safe_pose() {
+    RCLCPP_WARN(LOGGER, "BT recovery: going to safe pose.");
+    setup_joint_value_target(+0.0000, -1.5708, +0.0000, -1.5708, +0.0000,
+                             +0.0000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      return bt_fail("BT recovery failed: could not reach safe pose");
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_retreat_small_z() {
+    RCLCPP_WARN(LOGGER, "BT recovery: small +Z retreat.");
+    setup_waypoints_target(+0.000, +0.000, +0.01);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      return bt_fail("BT recovery failed: small Z retreat failed");
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_put_cup_back_fixed() {
+    if (is_cancel_requested(active_goal_handle_)) {
+      return bt_fail("Goal canceled");
+    }
+
+    RCLCPP_WARN(LOGGER,
+                "BT rotate recovery: returning cup to fixed cup position.");
+    publish_feedback(active_goal_handle_, "rotate_recovery_putback", 0.66f,
+                     active_holder_id_);
+
+    // Best-effort put-back routine to avoid carrying the cup into next retry.
+    setup_goal_pose_target(pre_x_, pre_y_, pre_z_, -1.000, +0.000, +0.000,
+                           +0.000);
+    plan_trajectory_kinematics();
+    if (!execute_trajectory_kinematics()) {
+      RCLCPP_WARN(LOGGER,
+                  "BT rotate recovery: failed moving above fixed cup pose.");
+    }
+
+    setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      RCLCPP_WARN(LOGGER, "BT rotate recovery: failed descending to put-back.");
+    }
+
+    setup_named_pose_gripper("open");
+    plan_trajectory_gripper();
+    if (!execute_trajectory_gripper()) {
+      RCLCPP_WARN(LOGGER,
+                  "BT rotate recovery: failed opening gripper at put-back.");
+    }
+
+    setup_waypoints_target(+0.000, +0.000, +APPROACH_Z_DELTA);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      RCLCPP_WARN(LOGGER, "BT rotate recovery: failed retreating after put-back.");
+    }
+
+    return BT::NodeStatus::SUCCESS;
+  }
+
+  BT::NodeStatus bt_force_failure() {
+    bt_goal_prepared_ = false; // reacquire target on retry attempt
+    RCLCPP_WARN(LOGGER, "BT: forcing attempt failure to trigger full retry.");
+    return BT::NodeStatus::FAILURE;
   }
 
   rclcpp_action::GoalResponse
@@ -582,10 +827,14 @@ private:
     execution_active_ = false;
   }
 
-  bool wait_for_cupholder(uint32_t holder_id, DetectedObject &holder,
-                          std::chrono::seconds timeout) {
+  bool wait_for_cupholder(
+      uint32_t holder_id, DetectedObject &holder, std::chrono::seconds timeout,
+      const std::shared_ptr<GoalHandleDeliverCoffee> &goal_handle = nullptr) {
     const auto start = std::chrono::steady_clock::now();
     while (rclcpp::ok()) {
+      if (is_cancel_requested(goal_handle)) {
+        return false;
+      }
       {
         std::lock_guard<std::mutex> lock(cupholder_mutex_);
         const auto it = latest_cupholders_.find(holder_id);

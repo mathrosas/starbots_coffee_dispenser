@@ -13,6 +13,11 @@ def generate_launch_description():
         "rviz",
         "config.rviz",
     )
+    bt_xml_path = os.path.join(
+        get_package_share_directory("object_manipulation"),
+        "bt_config",
+        "deliver_coffee_tree.xml",
+    )
 
     moveit_config = (
         MoveItConfigsBuilder("name", package_name="my_moveit_config")
@@ -64,7 +69,12 @@ def generate_launch_description():
         package="object_manipulation",
         executable="object_manipulation",
         output="screen",
-        parameters=[moveit_config.to_dict(), {"use_sim_time": True}],
+        parameters=[
+            moveit_config.to_dict(),
+            {"use_sim_time": True},
+            {"bt_xml_path": bt_xml_path},
+            {"bt_enable_groot": True},
+        ],
         arguments=["--ros-args", "--log-level", "info"],
     )
 
