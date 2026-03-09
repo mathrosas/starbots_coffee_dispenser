@@ -2,13 +2,14 @@
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
-#include <behaviortree_cpp_v3/bt_factory.h>
-#include <behaviortree_cpp_v3/loggers/bt_zmq_publisher.h>
+#include <behaviortree_cpp/bt_factory.h>
+#include <behaviortree_cpp/loggers/groot2_publisher.h>
 #include <custom_msgs/action/deliver_coffee.hpp>
 #include <custom_msgs/msg/detected_objects.hpp>
 #include <moveit_msgs/msg/display_robot_state.hpp>
 #include <moveit_msgs/msg/display_trajectory.hpp>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -38,6 +39,7 @@ static const std::string DELIVER_COFFEE_ACTION = "deliver_coffee";
 static const std::string OMPL_PIPELINE = "ompl";
 static const std::string PILZ_PIPELINE = "pilz_industrial_motion_planner";
 static const std::string PILZ_LIN = "LIN";
+static const std::string BT_STATUS_TOPIC = "/bt_node_status";
 static const std::string DEFAULT_BT_XML_REL_PATH =
     "/bt_config/deliver_coffee_tree.xml";
 
@@ -234,11 +236,13 @@ public:
     return false;
   }
 
-  BT::NodeStatus tick_bt_once() { return bt_tree_.tickRoot(); }
+  BT::NodeStatus tick_bt_once() {
+    return bt_tree_.tickOnce();
+  }
 
   void halt_bt_tree() {
-    if (bt_tree_.rootNode()) {
-      bt_tree_.rootNode()->halt();
+    if (bt_tree_ready_) {
+      bt_tree_.haltTree();
     }
   }
 
@@ -281,7 +285,8 @@ private:
   bool bt_enable_groot_{true};
   BT::BehaviorTreeFactory bt_factory_;
   BT::Tree bt_tree_;
-  std::unique_ptr<BT::PublisherZMQ> bt_groot_publisher_;
+  std::unique_ptr<BT::Groot2Publisher> bt_groot_publisher_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr bt_status_pub_;
   bool bt_tree_ready_{false};
   std::string bt_failure_reason_;
   std::shared_ptr<GoalHandleDeliverCoffee> active_goal_handle_;
@@ -348,88 +353,164 @@ private:
     register_bt_nodes();
     load_behavior_tree(bt_xml_path_);
 
+    bt_status_pub_ =
+        base_node_->create_publisher<std_msgs::msg::String>(BT_STATUS_TOPIC, 10);
+    RCLCPP_INFO(LOGGER, "BT status telemetry enabled on topic '%s'.",
+                BT_STATUS_TOPIC.c_str());
+
     if (bt_enable_groot_) {
       try {
-        bt_groot_publisher_ = std::make_unique<BT::PublisherZMQ>(bt_tree_);
+        bt_groot_publisher_ = std::make_unique<BT::Groot2Publisher>(bt_tree_);
         RCLCPP_INFO(LOGGER,
-                    "Groot (ZMQ) publisher enabled for DeliverCoffee BT.");
+                    "Groot2 publisher enabled for DeliverCoffee BT.");
       } catch (const std::exception &e) {
         RCLCPP_WARN(LOGGER, "Failed to enable Groot publisher: %s", e.what());
       }
     }
   }
 
+  BT::NodeStatus
+  publish_bt_node_status(const std::string &node_name, BT::NodeStatus status) {
+    if (!bt_status_pub_) {
+      return status;
+    }
+    std_msgs::msg::String msg;
+    msg.data = "[BT] " + node_name + " Node -> " + BT::toStr(status, false);
+    bt_status_pub_->publish(msg);
+    return status;
+  }
+
+  BT::NodeStatus run_bt_node(const std::string &node_name,
+                             const std::function<BT::NodeStatus()> &fn) {
+    return publish_bt_node_status(node_name, fn());
+  }
+
   void register_bt_nodes() {
     bt_factory_.registerSimpleCondition(
         "GoalNotCanceled",
-        [this](BT::TreeNode & /*node*/) { return bt_goal_not_canceled(); });
+        [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("GoalNotCanceled",
+                             [this]() { return bt_goal_not_canceled(); });
+        });
 
     // -sim style node IDs
     bt_factory_.registerSimpleAction(
         "ValidateDetection",
-        [this](BT::TreeNode & /*node*/) { return bt_validate_detection(); });
+        [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("ValidateDetection",
+                             [this]() { return bt_validate_detection(); });
+        });
     bt_factory_.registerSimpleAction(
-        "PrePick", [this](BT::TreeNode & /*node*/) { return bt_pre_pick(); });
+        "PrePick", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("PrePick", [this]() { return bt_pre_pick(); });
+        });
     bt_factory_.registerSimpleAction(
-        "Pick", [this](BT::TreeNode & /*node*/) { return bt_pick(); });
+        "Pick", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("Pick", [this]() { return bt_pick(); });
+        });
     bt_factory_.registerSimpleAction(
-        "PrePlace", [this](BT::TreeNode & /*node*/) { return bt_pre_place(); });
+        "PrePlace", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("PrePlace", [this]() { return bt_pre_place(); });
+        });
     bt_factory_.registerSimpleAction(
-        "Place", [this](BT::TreeNode & /*node*/) { return bt_place(); });
+        "Place", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("Place", [this]() { return bt_place(); });
+        });
     bt_factory_.registerSimpleAction(
-        "PutBack", [this](BT::TreeNode & /*node*/) { return bt_put_back(); });
+        "PutBack", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("PutBack", [this]() { return bt_put_back(); });
+        });
     bt_factory_.registerSimpleAction(
-        "Return", [this](BT::TreeNode & /*node*/) { return bt_return(); });
+        "Return", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("Return", [this]() { return bt_return(); });
+        });
+    bt_factory_.registerSimpleAction(
+        "ForceFail", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("ForceFail",
+                             [this]() { return bt_force_failure(); });
+        });
 
     // Legacy node IDs kept for backward-compatible XMLs
     bt_factory_.registerSimpleAction(
         "AcquireTarget",
-        [this](BT::TreeNode & /*node*/) { return bt_acquire_target(); });
+        [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("AcquireTarget",
+                             [this]() { return bt_acquire_target(); });
+        });
     bt_factory_.registerSimpleAction(
-        "MovePregrasp",
-        [this](BT::TreeNode & /*node*/) { return bt_move_pregrasp(); });
+        "MovePregrasp", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("MovePregrasp",
+                             [this]() { return bt_move_pregrasp(); });
+        });
     bt_factory_.registerSimpleAction(
-        "OpenGripper",
-        [this](BT::TreeNode & /*node*/) { return bt_open_gripper(); });
+        "OpenGripper", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("OpenGripper",
+                             [this]() { return bt_open_gripper(); });
+        });
     bt_factory_.registerSimpleAction(
-        "ApproachCup",
-        [this](BT::TreeNode & /*node*/) { return bt_approach_cup(); });
+        "ApproachCup", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("ApproachCup",
+                             [this]() { return bt_approach_cup(); });
+        });
     bt_factory_.registerSimpleAction(
-        "CloseGripper",
-        [this](BT::TreeNode & /*node*/) { return bt_close_gripper(); });
+        "CloseGripper", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("CloseGripper",
+                             [this]() { return bt_close_gripper(); });
+        });
     bt_factory_.registerSimpleAction(
-        "RetreatWithCup",
-        [this](BT::TreeNode & /*node*/) { return bt_retreat_with_cup(); });
+        "RetreatWithCup", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("RetreatWithCup",
+                             [this]() { return bt_retreat_with_cup(); });
+        });
     bt_factory_.registerSimpleAction(
-        "RotateToPlace",
-        [this](BT::TreeNode & /*node*/) { return bt_rotate_to_place(); });
+        "RotateToPlace", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("RotateToPlace",
+                             [this]() { return bt_rotate_to_place(); });
+        });
     bt_factory_.registerSimpleAction(
-        "MovePrePlace",
-        [this](BT::TreeNode & /*node*/) { return bt_move_pre_place(); });
+        "MovePrePlace", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("MovePrePlace",
+                             [this]() { return bt_move_pre_place(); });
+        });
     bt_factory_.registerSimpleAction(
-        "InsertCup",
-        [this](BT::TreeNode & /*node*/) { return bt_insert_cup(); });
+        "InsertCup", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("InsertCup", [this]() { return bt_insert_cup(); });
+        });
     bt_factory_.registerSimpleAction(
-        "ReleaseCup",
-        [this](BT::TreeNode & /*node*/) { return bt_release_cup(); });
+        "ReleaseCup", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("ReleaseCup",
+                             [this]() { return bt_release_cup(); });
+        });
     bt_factory_.registerSimpleAction(
-        "PostPlaceRetreat",
-        [this](BT::TreeNode & /*node*/) { return bt_post_place_retreat(); });
+        "PostPlaceRetreat", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("PostPlaceRetreat",
+                             [this]() { return bt_post_place_retreat(); });
+        });
     bt_factory_.registerSimpleAction(
-        "ReturnHome",
-        [this](BT::TreeNode & /*node*/) { return bt_return_home(); });
+        "ReturnHome", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("ReturnHome",
+                             [this]() { return bt_return_home(); });
+        });
     bt_factory_.registerSimpleAction(
-        "GoSafePose",
-        [this](BT::TreeNode & /*node*/) { return bt_go_safe_pose(); });
+        "GoSafePose", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("GoSafePose",
+                             [this]() { return bt_go_safe_pose(); });
+        });
     bt_factory_.registerSimpleAction(
-        "RetreatSmallZ",
-        [this](BT::TreeNode & /*node*/) { return bt_retreat_small_z(); });
+        "RetreatSmallZ", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("RetreatSmallZ",
+                             [this]() { return bt_retreat_small_z(); });
+        });
     bt_factory_.registerSimpleAction(
-        "PutCupBackFixed",
-        [this](BT::TreeNode & /*node*/) { return bt_put_cup_back_fixed(); });
+        "PutCupBackFixed", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("PutCupBackFixed",
+                             [this]() { return bt_put_cup_back_fixed(); });
+        });
     bt_factory_.registerSimpleAction(
-        "FailAttempt",
-        [this](BT::TreeNode & /*node*/) { return bt_force_failure(); });
+        "FailAttempt", [this](BT::TreeNode & /*node*/) {
+          return run_bt_node("FailAttempt",
+                             [this]() { return bt_force_failure(); });
+        });
   }
 
   void load_behavior_tree(const std::string &xml_path) {
