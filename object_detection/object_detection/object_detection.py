@@ -22,7 +22,7 @@ try:
 except ImportError:
     pcl = None
 
-ROI_MIN_X, ROI_MAX_X = -0.6, -0.2
+ROI_MIN_X, ROI_MAX_X = -0.6, -0.1
 ROI_MIN_Y, ROI_MAX_Y = -0.2, 0.2
 ROI_MIN_Z, ROI_MAX_Z = -0.75, 0.0
 
