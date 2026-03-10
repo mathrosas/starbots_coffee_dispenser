@@ -48,6 +48,7 @@ static const std::string DEFAULT_BT_XML_REL_PATH =
 // offsets / “magic numbers”:
 static constexpr double PREGRASP_Z_OFFSET = 0.20; // 20 cm above detected object
 static constexpr double APPROACH_Z_DELTA = 0.01;  // straight down
+static constexpr double PLACE_RETRY_Z_STEP = 0.002; // 2 mm per retry
 
 // project defaults for fixed-cup mode [0.260, 0.370, -0.007]
 static constexpr double FIXED_CUP_X = 0.299; // 0.300
@@ -211,6 +212,8 @@ public:
     bt_goal_prepared_ = false;
     bt_place_failed_ = false;
     bt_rotated_to_place_ = false;
+    bt_pre_place_retry_index_ = 0;
+    bt_insert_retry_index_ = 0;
     clear_orientation_constraints();
 
     halt_bt_tree();
@@ -298,6 +301,8 @@ private:
   bool bt_goal_prepared_{false};
   bool bt_place_failed_{false};
   bool bt_rotated_to_place_{false};
+  int bt_pre_place_retry_index_{0};
+  int bt_insert_retry_index_{0};
   moveit_msgs::msg::Constraints path_constraints_;
 
   double cup_x_{FIXED_CUP_X};
@@ -467,7 +472,7 @@ private:
     bt_factory_.registerSimpleAction(
         "MovePrePlace", [this](BT::TreeNode & /*node*/) {
           return run_bt_node("MovePrePlace",
-                             [this]() { return bt_move_pre_place(); });
+                             [this]() { return bt_move_pre_place(0.0); });
         });
     bt_factory_.registerSimpleAction(
         "InsertCup", [this](BT::TreeNode & /*node*/) {
@@ -537,6 +542,8 @@ private:
   BT::NodeStatus bt_validate_detection() {
     bt_place_failed_ = false;
     bt_rotated_to_place_ = false;
+    bt_pre_place_retry_index_ = 0;
+    bt_insert_retry_index_ = 0;
     clear_orientation_constraints();
     return bt_acquire_target();
   }
@@ -568,10 +575,13 @@ private:
       bt_rotated_to_place_ = true;
     }
     apply_orientation_constraints();
-    if (bt_move_pre_place() != BT::NodeStatus::SUCCESS) {
+    const double retry_lift = bt_pre_place_retry_index_ * PLACE_RETRY_Z_STEP;
+    if (bt_move_pre_place(retry_lift) != BT::NodeStatus::SUCCESS) {
+      bt_pre_place_retry_index_++;
       clear_orientation_constraints();
       return BT::NodeStatus::FAILURE;
     }
+    bt_insert_retry_index_ = 0;
     clear_orientation_constraints();
     return BT::NodeStatus::SUCCESS;
   }
@@ -754,13 +764,17 @@ private:
     return BT::NodeStatus::SUCCESS;
   }
 
-  BT::NodeStatus bt_move_pre_place() {
+  BT::NodeStatus bt_move_pre_place(double retry_lift) {
     publish_feedback(active_goal_handle_, "pre_place", 0.72f,
                      active_holder_id_);
+    const double pre_place_z = place_z_ + PREGRASP_Z_OFFSET + 0.066 + retry_lift;
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
-                place_x_, place_y_, place_z_ + PREGRASP_Z_OFFSET + 0.066);
-    setup_goal_pose_target(place_x_, place_y_,
-                           place_z_ + PREGRASP_Z_OFFSET + 0.066, -1.000, +0.000,
+                place_x_, place_y_, pre_place_z);
+    RCLCPP_INFO(LOGGER,
+                "Pre-place retry index=%d, lift=%.1f mm (step=%.1f mm)",
+                bt_pre_place_retry_index_, retry_lift * 1000.0,
+                PLACE_RETRY_Z_STEP * 1000.0);
+    setup_goal_pose_target(place_x_, place_y_, pre_place_z, -1.000, +0.000,
                            +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
@@ -774,13 +788,22 @@ private:
   BT::NodeStatus bt_insert_cup() {
     publish_feedback(active_goal_handle_, "insert_cup", 0.82f,
                      active_holder_id_);
+    const double place_retry_depth = (bt_pre_place_retry_index_ +
+                                      bt_insert_retry_index_) *
+                                     PLACE_RETRY_Z_STEP;
+    const double insert_delta = APPROACH_Z_DELTA + place_retry_depth;
     RCLCPP_INFO(LOGGER,
                 "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
                 place_x_, place_y_,
-                place_z_ + PREGRASP_Z_OFFSET + 0.066 - APPROACH_Z_DELTA);
-    setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
+                place_z_ + PREGRASP_Z_OFFSET + 0.066 - insert_delta);
+    RCLCPP_INFO(LOGGER,
+                "Insert retry index=%d (pre-place index=%d), descend=%.1f mm",
+                bt_insert_retry_index_, bt_pre_place_retry_index_,
+                insert_delta * 1000.0);
+    setup_waypoints_target(+0.000, +0.000, -insert_delta);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
+      bt_insert_retry_index_++;
       return bt_fail("Failed Cartesian insert to cupholder");
     }
     log_xy_error_to_holder("after_insert_cartesian", place_x_, place_y_,
