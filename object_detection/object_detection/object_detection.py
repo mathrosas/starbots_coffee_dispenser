@@ -64,7 +64,7 @@ class ObjectDetection(Node):
         super().__init__("object_detection_node")
 
         # Optional runtime params (kept minimal)
-        self.declare_parameter("pointcloud_topic", "/wrist_rgbd_depth_sensor/points_filtered")
+        self.declare_parameter("pointcloud_topic", "/wrist_rgbd_depth_sensor/points")
         self.declare_parameter("hough_dp", 1.0)
         self.declare_parameter("hough_min_dist", 60)
         self.declare_parameter("hough_param1", 90)

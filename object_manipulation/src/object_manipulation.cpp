@@ -6,8 +6,10 @@
 #include <behaviortree_cpp/loggers/groot2_publisher.h>
 #include <custom_msgs/action/deliver_coffee.hpp>
 #include <custom_msgs/msg/detected_objects.hpp>
+#include <moveit_msgs/msg/constraints.hpp>
 #include <moveit_msgs/msg/display_robot_state.hpp>
 #include <moveit_msgs/msg/display_trajectory.hpp>
+#include <moveit_msgs/msg/orientation_constraint.hpp>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
 #include <std_msgs/msg/string.hpp>
 
@@ -106,7 +108,7 @@ public:
         move_group_node_, PLANNING_GROUP_GRIPPER);
 
     move_group_robot_->setPoseReferenceFrame(REF_FRAME);
-    move_group_robot_->setPlanningTime(10.0);
+    move_group_robot_->setPlanningTime(20.0);
     move_group_robot_->setNumPlanningAttempts(20);
     move_group_robot_->setGoalPositionTolerance(0.0005);
     move_group_robot_->setGoalOrientationTolerance(0.05);
@@ -208,6 +210,8 @@ public:
     bt_failure_reason_.clear();
     bt_goal_prepared_ = false;
     bt_place_failed_ = false;
+    bt_rotated_to_place_ = false;
+    clear_orientation_constraints();
 
     halt_bt_tree();
     BT::NodeStatus status = BT::NodeStatus::RUNNING;
@@ -216,6 +220,7 @@ public:
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     halt_bt_tree();
+    clear_orientation_constraints();
 
     if (status == BT::NodeStatus::SUCCESS) {
       active_goal_handle_.reset();
@@ -236,9 +241,7 @@ public:
     return false;
   }
 
-  BT::NodeStatus tick_bt_once() {
-    return bt_tree_.tickOnce();
-  }
+  BT::NodeStatus tick_bt_once() { return bt_tree_.tickOnce(); }
 
   void halt_bt_tree() {
     if (bt_tree_ready_) {
@@ -294,6 +297,8 @@ private:
   DetectedObject active_holder_;
   bool bt_goal_prepared_{false};
   bool bt_place_failed_{false};
+  bool bt_rotated_to_place_{false};
+  moveit_msgs::msg::Constraints path_constraints_;
 
   double cup_x_{FIXED_CUP_X};
   double cup_y_{FIXED_CUP_Y};
@@ -353,24 +358,23 @@ private:
     register_bt_nodes();
     load_behavior_tree(bt_xml_path_);
 
-    bt_status_pub_ =
-        base_node_->create_publisher<std_msgs::msg::String>(BT_STATUS_TOPIC, 10);
+    bt_status_pub_ = base_node_->create_publisher<std_msgs::msg::String>(
+        BT_STATUS_TOPIC, 10);
     RCLCPP_INFO(LOGGER, "BT status telemetry enabled on topic '%s'.",
                 BT_STATUS_TOPIC.c_str());
 
     if (bt_enable_groot_) {
       try {
         bt_groot_publisher_ = std::make_unique<BT::Groot2Publisher>(bt_tree_);
-        RCLCPP_INFO(LOGGER,
-                    "Groot2 publisher enabled for DeliverCoffee BT.");
+        RCLCPP_INFO(LOGGER, "Groot2 publisher enabled for DeliverCoffee BT.");
       } catch (const std::exception &e) {
         RCLCPP_WARN(LOGGER, "Failed to enable Groot publisher: %s", e.what());
       }
     }
   }
 
-  BT::NodeStatus
-  publish_bt_node_status(const std::string &node_name, BT::NodeStatus status) {
+  BT::NodeStatus publish_bt_node_status(const std::string &node_name,
+                                        BT::NodeStatus status) {
     if (!bt_status_pub_) {
       return status;
     }
@@ -387,16 +391,14 @@ private:
 
   void register_bt_nodes() {
     bt_factory_.registerSimpleCondition(
-        "GoalNotCanceled",
-        [this](BT::TreeNode & /*node*/) {
+        "GoalNotCanceled", [this](BT::TreeNode & /*node*/) {
           return run_bt_node("GoalNotCanceled",
                              [this]() { return bt_goal_not_canceled(); });
         });
 
     // -sim style node IDs
     bt_factory_.registerSimpleAction(
-        "ValidateDetection",
-        [this](BT::TreeNode & /*node*/) {
+        "ValidateDetection", [this](BT::TreeNode & /*node*/) {
           return run_bt_node("ValidateDetection",
                              [this]() { return bt_validate_detection(); });
         });
@@ -404,36 +406,31 @@ private:
         "PrePick", [this](BT::TreeNode & /*node*/) {
           return run_bt_node("PrePick", [this]() { return bt_pre_pick(); });
         });
-    bt_factory_.registerSimpleAction(
-        "Pick", [this](BT::TreeNode & /*node*/) {
-          return run_bt_node("Pick", [this]() { return bt_pick(); });
-        });
+    bt_factory_.registerSimpleAction("Pick", [this](BT::TreeNode & /*node*/) {
+      return run_bt_node("Pick", [this]() { return bt_pick(); });
+    });
     bt_factory_.registerSimpleAction(
         "PrePlace", [this](BT::TreeNode & /*node*/) {
           return run_bt_node("PrePlace", [this]() { return bt_pre_place(); });
         });
-    bt_factory_.registerSimpleAction(
-        "Place", [this](BT::TreeNode & /*node*/) {
-          return run_bt_node("Place", [this]() { return bt_place(); });
-        });
+    bt_factory_.registerSimpleAction("Place", [this](BT::TreeNode & /*node*/) {
+      return run_bt_node("Place", [this]() { return bt_place(); });
+    });
     bt_factory_.registerSimpleAction(
         "PutBack", [this](BT::TreeNode & /*node*/) {
           return run_bt_node("PutBack", [this]() { return bt_put_back(); });
         });
-    bt_factory_.registerSimpleAction(
-        "Return", [this](BT::TreeNode & /*node*/) {
-          return run_bt_node("Return", [this]() { return bt_return(); });
-        });
-    bt_factory_.registerSimpleAction(
-        "ForceFail", [this](BT::TreeNode & /*node*/) {
-          return run_bt_node("ForceFail",
-                             [this]() { return bt_force_failure(); });
-        });
+    bt_factory_.registerSimpleAction("Return", [this](BT::TreeNode & /*node*/) {
+      return run_bt_node("Return", [this]() { return bt_return(); });
+    });
+    bt_factory_.registerSimpleAction("ForceFail", [this](
+                                                      BT::TreeNode & /*node*/) {
+      return run_bt_node("ForceFail", [this]() { return bt_force_failure(); });
+    });
 
     // Legacy node IDs kept for backward-compatible XMLs
     bt_factory_.registerSimpleAction(
-        "AcquireTarget",
-        [this](BT::TreeNode & /*node*/) {
+        "AcquireTarget", [this](BT::TreeNode & /*node*/) {
           return run_bt_node("AcquireTarget",
                              [this]() { return bt_acquire_target(); });
         });
@@ -539,6 +536,8 @@ private:
 
   BT::NodeStatus bt_validate_detection() {
     bt_place_failed_ = false;
+    bt_rotated_to_place_ = false;
+    clear_orientation_constraints();
     return bt_acquire_target();
   }
 
@@ -561,34 +560,50 @@ private:
   }
 
   BT::NodeStatus bt_pre_place() {
-    if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
-      return BT::NodeStatus::FAILURE;
+    if (!bt_rotated_to_place_) {
+      clear_orientation_constraints();
+      if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
+        return BT::NodeStatus::FAILURE;
+      }
+      bt_rotated_to_place_ = true;
     }
+    apply_orientation_constraints();
     if (bt_move_pre_place() != BT::NodeStatus::SUCCESS) {
+      clear_orientation_constraints();
       return BT::NodeStatus::FAILURE;
     }
+    clear_orientation_constraints();
     return BT::NodeStatus::SUCCESS;
   }
 
   BT::NodeStatus bt_place() {
+    apply_orientation_constraints();
     if (bt_insert_cup() != BT::NodeStatus::SUCCESS) {
+      clear_orientation_constraints();
       return BT::NodeStatus::FAILURE;
     }
     if (bt_release_cup() != BT::NodeStatus::SUCCESS) {
+      clear_orientation_constraints();
       return BT::NodeStatus::FAILURE;
     }
     if (bt_post_place_retreat() != BT::NodeStatus::SUCCESS) {
+      clear_orientation_constraints();
       return BT::NodeStatus::FAILURE;
     }
+    clear_orientation_constraints();
     return BT::NodeStatus::SUCCESS;
   }
 
   BT::NodeStatus bt_put_back() {
     bt_place_failed_ = true;
-    return bt_put_cup_back_fixed();
+    apply_orientation_constraints();
+    const auto status = bt_put_cup_back_fixed();
+    clear_orientation_constraints();
+    return status;
   }
 
   BT::NodeStatus bt_return() {
+    clear_orientation_constraints();
     const auto status = bt_return_home();
     if (status != BT::NodeStatus::SUCCESS) {
       return status;
@@ -708,7 +723,7 @@ private:
     publish_feedback(active_goal_handle_, "retreat_with_cup", 0.50f,
                      active_holder_id_);
     RCLCPP_INFO(LOGGER, "Retreating...");
-    setup_waypoints_target(+0.000, +0.000, 5 * APPROACH_Z_DELTA);
+    setup_waypoints_target(+0.000, +0.000, 10 * APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
       return bt_fail("Failed Cartesian retreat");
@@ -1049,6 +1064,31 @@ private:
     move_group_robot_->setJointValueTarget(joint_group_positions_robot_);
   }
 
+  void apply_orientation_constraints() {
+    moveit_msgs::msg::OrientationConstraint ocm;
+    ocm.link_name = move_group_robot_->getEndEffectorLink();
+    ocm.header.frame_id = move_group_robot_->getPlanningFrame();
+    // Equivalent to RPY(pi, 0, 0): keep gripper pointing down.
+    ocm.orientation.x = -1.0;
+    ocm.orientation.y = 0.0;
+    ocm.orientation.z = 0.0;
+    ocm.orientation.w = 0.0;
+    ocm.absolute_x_axis_tolerance = 0.1;
+    ocm.absolute_y_axis_tolerance = 0.1;
+    ocm.absolute_z_axis_tolerance = M_PI;
+    ocm.weight = 1.0;
+
+    path_constraints_.orientation_constraints.clear();
+    path_constraints_.orientation_constraints.push_back(ocm);
+    move_group_robot_->setPathConstraints(path_constraints_);
+    RCLCPP_INFO(LOGGER, "Applied orientation constraints (gripper-down).");
+  }
+
+  void clear_orientation_constraints() {
+    path_constraints_.orientation_constraints.clear();
+    move_group_robot_->setPathConstraints(path_constraints_);
+  }
+
   void setup_goal_pose_target(float pos_x, float pos_y, float pos_z,
                               float quat_x, float quat_y, float quat_z,
                               float quat_w) {
@@ -1067,7 +1107,6 @@ private:
 
   void plan_trajectory_kinematics() {
     move_group_robot_->setPlanningPipelineId(OMPL_PIPELINE);
-    move_group_robot_->setPlannerId("RRTConnectkConfigDefault");
     plan_success_robot_ =
         (move_group_robot_->plan(kinematics_trajectory_plan_) ==
          moveit::core::MoveItErrorCode::SUCCESS);

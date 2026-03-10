@@ -28,31 +28,12 @@ def generate_launch_description():
         .to_moveit_configs()
     )
 
-    pointcloud_filter_node = Node(
-        package="pointcloud_filter",
-        executable="pointcloud_filter_node",
-        name="pointcloud_filter_node",
-        output="screen",
-        parameters=[
-            {
-                "pointcloud_topic": "/wrist_rgbd_depth_sensor/points",
-                "filtered_pc_topic": "/wrist_rgbd_depth_sensor/points_filtered",
-            }
-        ],
-        arguments=["--ros-args", "--log-level", "info"],
-    )
-
     object_detection_node = Node(
         package="object_detection",
         executable="object_detection",
         name="object_detection",
         output="screen",
         arguments=["--ros-args", "--log-level", "info"],
-    )
-
-    delayed_object_detection_node = TimerAction(
-        period=1.0,
-        actions=[object_detection_node],
     )
 
     move_group_node = Node(
@@ -112,8 +93,7 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            pointcloud_filter_node,
-            delayed_object_detection_node,
+            object_detection_node,
             move_group_node,
             add_scene_node,
             rviz_node,
