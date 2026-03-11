@@ -788,16 +788,15 @@ private:
   BT::NodeStatus bt_insert_cup() {
     publish_feedback(active_goal_handle_, "insert_cup", 0.82f,
                      active_holder_id_);
-    const double place_retry_depth = (bt_pre_place_retry_index_ +
-                                      bt_insert_retry_index_) *
-                                     PLACE_RETRY_Z_STEP;
-    const double insert_delta = APPROACH_Z_DELTA + place_retry_depth;
+    const double pre_place_lift =
+        bt_pre_place_retry_index_ * PLACE_RETRY_Z_STEP;
+    const double insert_delta = APPROACH_Z_DELTA + 0.5 * pre_place_lift;
     RCLCPP_INFO(LOGGER,
                 "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
                 place_x_, place_y_,
                 place_z_ + PREGRASP_Z_OFFSET + 0.066 - insert_delta);
     RCLCPP_INFO(LOGGER,
-                "Insert retry index=%d (pre-place index=%d), descend=%.1f mm",
+                "Insert retry index=%d (pre-place index=%d), descend=%.1f mm (base + half lift)",
                 bt_insert_retry_index_, bt_pre_place_retry_index_,
                 insert_delta * 1000.0);
     setup_waypoints_target(+0.000, +0.000, -insert_delta);
