@@ -10,13 +10,9 @@
           <Pick/>
           <Fallback name="PlaceOrRecover">
             <Sequence name="TrytoPlace">
-              <RetryUntilSuccessful num_attempts="2">
-                <PrePlace name="Pre-place"/>
-              </RetryUntilSuccessful>
+              <PrePlace name="Pre-place"/>
               <Sequence name="PlaceCore">
-                <RetryUntilSuccessful num_attempts="2">
-                  <InsertCup/>
-                </RetryUntilSuccessful>
+                <InsertCup/>
                 <ReleaseCup/>
                 <PostPlaceRetreat/>
               </Sequence>

@@ -5,9 +5,11 @@
 
 #include <moveit_msgs/msg/orientation_constraint.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace object_manipulation {
@@ -33,6 +35,10 @@ void MotionExecutor::set_joint_state_timeout_sec(double timeout_sec) {
 
 void MotionExecutor::set_start_state_max_joint_delta(double max_joint_delta) {
   start_state_max_joint_delta_ = max_joint_delta;
+}
+
+void MotionExecutor::set_settle_delay_ms(int settle_delay_ms) {
+  settle_delay_ms_ = (settle_delay_ms < 0) ? 0 : settle_delay_ms;
 }
 
 moveit_msgs::msg::Constraints MotionExecutor::make_gripper_down_constraints(
@@ -154,6 +160,7 @@ bool MotionExecutor::execute_gripper_named(const std::string &named_target,
     return false;
   }
 
+  maybe_settle_delay();
   return true;
 }
 
@@ -324,6 +331,7 @@ bool MotionExecutor::execute_arm_plan_with_watch_guards(MotionStage stage,
   }
 
   log_state(std::string("post_execute_") + to_string(stage));
+  maybe_settle_delay();
   return true;
 }
 
@@ -338,6 +346,13 @@ void MotionExecutor::apply_arm_policy(const MotionPolicy &policy) {
   arm_->setNumPlanningAttempts(policy.num_planning_attempts);
   arm_->setMaxVelocityScalingFactor(policy.velocity_scaling);
   arm_->setMaxAccelerationScalingFactor(policy.acceleration_scaling);
+}
+
+void MotionExecutor::maybe_settle_delay() const {
+  if (settle_delay_ms_ <= 0) {
+    return;
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(settle_delay_ms_));
 }
 
 std::size_t MotionExecutor::count_points(const Plan &plan) {

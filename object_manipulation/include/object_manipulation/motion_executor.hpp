@@ -31,6 +31,7 @@ public:
   void set_watch_guards_enabled(bool enabled);
   void set_joint_state_timeout_sec(double timeout_sec);
   void set_start_state_max_joint_delta(double max_joint_delta);
+  void set_settle_delay_ms(int settle_delay_ms);
 
   moveit_msgs::msg::Constraints
   make_gripper_down_constraints(const std::string &end_effector_link,
@@ -69,6 +70,7 @@ private:
   bool execute_arm_plan_with_watch_guards(MotionStage stage, const Plan &plan,
                                           std::string &reason);
   void apply_arm_policy(const MotionPolicy &policy);
+  void maybe_settle_delay() const;
   static std::size_t count_points(const Plan &plan);
 
   std::shared_ptr<MoveGroupInterface> arm_;
@@ -81,10 +83,10 @@ private:
   bool watch_guards_enabled_{true};
   double joint_state_timeout_sec_{2.0};
   double start_state_max_joint_delta_{0.01};
+  int settle_delay_ms_{0};
 
   Plan arm_plan_;
   Plan gripper_plan_;
 };
 
 } // namespace object_manipulation
-
