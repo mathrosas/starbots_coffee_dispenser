@@ -24,7 +24,15 @@ find_package(moveit_visual_tools REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_executable(add_coffee_scene src/add_coffee_scene.cpp)
-add_executable(object_manipulation src/object_manipulation.cpp)
+add_executable(
+  object_manipulation
+  src/object_manipulation.cpp
+  src/motion_policy.cpp
+  src/watch_guards.cpp
+  src/motion_executor.cpp
+)
+
+target_include_directories(object_manipulation PRIVATE include)
 
 ament_target_dependencies(add_coffee_scene
 	ament_cmake
@@ -52,6 +60,10 @@ install(TARGETS object_manipulation add_coffee_scene
 
 install(DIRECTORY launch bt_config
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 ament_package()
