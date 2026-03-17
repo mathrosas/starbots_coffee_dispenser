@@ -406,11 +406,11 @@ private:
   static void ensure_sim_time_true(const rclcpp::Node::SharedPtr &node) {
     try {
       if (!node->has_parameter("use_sim_time")) {
-        node->declare_parameter<bool>("use_sim_time", true);
+        node->declare_parameter<bool>("use_sim_time", false);
       }
     } catch (const rclcpp::exceptions::ParameterAlreadyDeclaredException &) {
     }
-    node->set_parameter(rclcpp::Parameter("use_sim_time", true));
+    node->set_parameter(rclcpp::Parameter("use_sim_time", false));
   }
 
   static int parse_ch_to_id(const std::string &s) {

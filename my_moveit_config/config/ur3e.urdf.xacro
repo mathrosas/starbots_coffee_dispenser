@@ -1,16 +1,16 @@
 <?xml version="1.0"?>
-<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="name">
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ur3e">
     <xacro:arg name="my_initial_positions_file"
            default="$(find my_moveit_config)/config/initial_positions.yaml" />
 
-    <!-- Import name urdf file -->
+    <!-- Import URDF file -->
     <xacro:include filename="$(find ur_description)/urdf/ur.urdf.xacro" />
 
     <!-- Import control_xacro -->
-    <xacro:include filename="name.ros2_control.xacro" />
+    <xacro:include filename="ur3e.ros2_control.xacro" />
 
 
-    <xacro:name_ros2_control
+    <xacro:ur3e_ros2_control
     name="FakeSystem"
     initial_positions_file="$(arg my_initial_positions_file)" />
 

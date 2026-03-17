@@ -51,7 +51,7 @@ def generate_launch_description():
                 ]
             },
             {"default_planning_pipeline": "ompl"},
-            {"use_sim_time": True},
+            {"use_sim_time": False},
         ],
     )
 
@@ -60,7 +60,7 @@ def generate_launch_description():
         executable="add_coffee_scene",
         name="add_coffee_scene",
         output="screen",
-        parameters=[{"use_sim_time": True}],
+        parameters=[{"use_sim_time": False}],
     )
 
     rviz_node = Node(
@@ -69,7 +69,7 @@ def generate_launch_description():
         name="rviz2",
         output="screen",
         arguments=["-d", rviz_config],
-        parameters=[{"use_sim_time": True}],
+        parameters=[{"use_sim_time": False}],
     )
 
     object_manipulation_node = Node(
@@ -79,7 +79,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             moveit_config.to_dict(),
-            {"use_sim_time": True},
+            {"use_sim_time": False},
             {"bt_xml_path": bt_xml_path},
             {"bt_enable_groot": True},
         ],

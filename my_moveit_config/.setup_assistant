@@ -1,9 +1,9 @@
 moveit_setup_assistant_config:
   urdf:
-    package: ur_description
-    relative_path: urdf/ur.urdf.xacro
+    package: my_moveit_config
+    relative_path: config/ur3e.urdf.xacro
   srdf:
-    relative_path: config/name.srdf
+    relative_path: config/ur3e.srdf
   package_settings:
     author_name: Mathias Rosas
     author_email: mathiasrosas@gmail.com

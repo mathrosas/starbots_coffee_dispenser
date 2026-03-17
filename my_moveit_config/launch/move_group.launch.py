@@ -1,12 +1,15 @@
-
 from moveit_configs_utils import MoveItConfigsBuilder
-from moveit_configs_utils.launches import generate_move_group_launch
 
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
 def generate_launch_description():
-    moveit_config = MoveItConfigsBuilder("name", package_name="my_moveit_config").to_moveit_configs()
+    moveit_config = (
+        MoveItConfigsBuilder("ur3e", package_name="my_moveit_config")
+        .robot_description(file_path="config/ur3e.urdf.xacro")
+        .robot_description_semantic(file_path="config/ur3e.srdf")
+        .to_moveit_configs()
+    )
     
     # Move Group Node
     move_group_node = Node(
@@ -17,7 +20,7 @@ def generate_launch_description():
             moveit_config.to_dict(),
             {"trajectory_execution.allowed_execution_duration_scaling": 5.0,},
             {"publish_robot_description_semantic": True},
-            {"use_sim_time": True},
+            {"use_sim_time": False},
         ],
     )
 
