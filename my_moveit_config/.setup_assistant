@@ -1,10 +1,25 @@
 moveit_setup_assistant_config:
   urdf:
     package: my_moveit_config
-    relative_path: config/ur3e.urdf.xacro
+    relative_path: config/name.urdf.xacro
   srdf:
-    relative_path: config/ur3e.srdf
+    relative_path: config/name.srdf
   package_settings:
     author_name: Mathias Rosas
     author_email: mathiasrosas@gmail.com
-    generated_timestamp: 1761335259
+    generated_timestamp: 1773925983
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
+  modified_urdf:
+    xacros:
+      - control_xacro
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
