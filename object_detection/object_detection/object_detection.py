@@ -22,17 +22,17 @@ try:
 except ImportError:
     pcl = None
 
-ROI_MIN_X, ROI_MAX_X = -0.6, -0.1
-ROI_MIN_Y, ROI_MAX_Y = -0.2, 0.2
-ROI_MIN_Z, ROI_MAX_Z = -0.75, 0.0
+ROI_MIN_X, ROI_MAX_X = -0.7, -0.2
+ROI_MIN_Y, ROI_MAX_Y = -0.2, 0.5
+ROI_MIN_Z, ROI_MAX_Z = -0.6, -0.3
 
 BELOW_BAND = 0.06
-Z_GAP_MIN = 0.01
-TRAY_RADIUS_CAP = 0.14
+Z_GAP_MIN = 0.02
+TRAY_RADIUS_CAP = 0.15
 
-CUP_MIN_RADIUS = 0.028
+CUP_MIN_RADIUS = 0.01
 CUP_MAX_RADIUS = 0.04
-CUP_MIN_HEIGHT = 0.02
+CUP_MIN_HEIGHT = 0.005
 CUP_MAX_HEIGHT = 0.04
 
 CLUSTER_TOLERANCE = 0.04
@@ -40,19 +40,19 @@ MIN_CLUSTER_SIZE = 30
 MAX_CLUSTER_SIZE = 100000
 MIN_CENTROID_DISTANCE = 0.05
 
-OCCUPANCY_Z_MARGIN = 0.04
+OCCUPANCY_Z_MARGIN = 0.03
 OCCUPANCY_RADIUS_PAD = 0.01
-OCCUPANCY_PTS_THRESH = 20
+OCCUPANCY_PTS_THRESH = 10
 
-CUPHOLDER_OFFSET_X = -0.0055
-CUPHOLDER_OFFSET_Y = -0.013
-CUPHOLDER_OFFSET_Z = 0.01
+CUPHOLDER_OFFSET_X = 0.0
+CUPHOLDER_OFFSET_Y = 0.0
+CUPHOLDER_OFFSET_Z = 0.0
 
-HOUGH_OFFSET_Y = -0.013
-HOUGH_OFFSET_Z = 0.024
+HOUGH_OFFSET_Y = 0.0
+HOUGH_OFFSET_Z = 0.0
 
-FUSION_WEIGHT_HOUGH = 0.3
-FUSION_WEIGHT_PCL = 0.7
+FUSION_WEIGHT_HOUGH = 0.4
+FUSION_WEIGHT_PCL = 0.6
 FUSION_MATCH_THRESHOLD = 0.03
 
 TRAY_MARKER_HEIGHT = 0.09
@@ -64,28 +64,38 @@ class ObjectDetection(Node):
         super().__init__("object_detection_node")
 
         # Optional runtime params (kept minimal)
-        self.declare_parameter("pointcloud_topic", "/wrist_rgbd_depth_sensor/points")
-        self.declare_parameter("hough_dp", 1.0)
-        self.declare_parameter("hough_min_dist", 60)
-        self.declare_parameter("hough_param1", 90)
-        self.declare_parameter("hough_param2", 20)
-        self.declare_parameter("hough_min_radius", 18)
-        self.declare_parameter("hough_max_radius", 24)
-        self.declare_parameter("hough_gauss_k", 5)
+        self.declare_parameter("pointcloud_topic", "/D415/barista_points")
+        self.declare_parameter("hough_dp", 1.6)
+        self.declare_parameter("hough_min_dist", 20)
+        self.declare_parameter("hough_param1", 162)
+        self.declare_parameter("hough_param2", 30)
+        self.declare_parameter("hough_min_radius", 10)
+        self.declare_parameter("hough_max_radius", 18)
+        self.declare_parameter("hough_gauss_k", 6)
 
         pointcloud_topic = str(self.get_parameter("pointcloud_topic").value)
 
         # Publishers
-        self.annot_pub = self.create_publisher(Image, "tray_cam_annotated", 10)
+        self.annot_pub = self.create_publisher(Image, "barista_cam_annotated", 10)
+        self.annot_legacy_pub = self.create_publisher(Image, "tray_cam_annotated", 10)
         self.tray_marker_pub = self.create_publisher(MarkerArray, "/tray_marker", 10)
-        self.cupholder_marker_pub = self.create_publisher(MarkerArray, "/cup_holder_marker", 10)
+        self.cupholder_marker_pub = self.create_publisher(
+            MarkerArray, "/cup_holder_markers", 10
+        )
+        self.cupholder_marker_legacy_pub = self.create_publisher(
+            MarkerArray, "/cup_holder_marker", 10
+        )
         self.tray_detected_pub = self.create_publisher(DetectedSurfaces, "/tray_detected", 10)
         self.cuph_detected_pub = self.create_publisher(DetectedObjects, "/cup_holder_detected", 10)
 
         # Subscriptions (direct camera/depth Hough branch + pointcloud PCL branch)
-        self.create_subscription(Image, "/wrist_rgbd_depth_sensor/image_raw", self.image_callback, 10)
-        self.create_subscription(Image, "/wrist_rgbd_depth_sensor/depth/image_raw", self.depth_callback, 10)
-        self.create_subscription(CameraInfo, "/wrist_rgbd_depth_sensor/camera_info", self.caminfo_callback, 10)
+        self.create_subscription(Image, "/D415/color/image_raw", self.image_callback, 10)
+        self.create_subscription(
+            Image, "/D415/aligned_depth_to_color/image_raw", self.depth_callback, 10
+        )
+        self.create_subscription(
+            CameraInfo, "/D415/aligned_depth_to_color/camera_info", self.caminfo_callback, 10
+        )
         self.create_subscription(PointCloud2, pointcloud_topic, self.pc_callback, 10)
 
         self.tf_buffer = tf2_ros.Buffer()
@@ -133,7 +143,7 @@ class ObjectDetection(Node):
         annotated = img.copy()
 
         h_img, w_img = gray.shape[:2]
-        crop_w = 2 * w_img // 3
+        crop_w = 3 * w_img // 4
         proc_gray = gray[:, :crop_w]
         x_off = 0
 
@@ -206,6 +216,7 @@ class ObjectDetection(Node):
             out = self.bridge.cv2_to_imgmsg(annotated, encoding="bgr8")
             out.header = msg.header
             self.annot_pub.publish(out)
+            self.annot_legacy_pub.publish(out)
         except Exception as exc:
             self.get_logger().warn(f"Failed to publish annotated image: {exc}")
 
@@ -613,7 +624,10 @@ class ObjectDetection(Node):
             )
             points_above = np.sum(
                 (radial < (radius + OCCUPANCY_RADIUS_PAD))
-                & (reference_points[:, 2] > (float(centroid[2]) + OCCUPANCY_Z_MARGIN))
+                & (
+                    reference_points[:, 2]
+                    > (float(centroid[2]) + height / 2.0 + OCCUPANCY_Z_MARGIN)
+                )
             )
             if int(points_above) > OCCUPANCY_PTS_THRESH:
                 occupied.append(centroid.tolist())
@@ -633,7 +647,16 @@ class ObjectDetection(Node):
             dims_list.append([float(dims[0]), float(dims[1]), float(dims[2])])
 
         self.occupied_pcl_centroids = occupied
-        return self.filter_close_cupholders_with_dims(centroids, dims_list, MIN_CENTROID_DISTANCE)
+        filtered_centroids, filtered_dims = self.filter_close_cupholders_with_dims(
+            centroids, dims_list, MIN_CENTROID_DISTANCE
+        )
+        sorted_results = sorted(
+            zip(filtered_centroids, filtered_dims), key=lambda x: x[0][0]
+        )
+        if not sorted_results:
+            return [], []
+        sorted_centroids, sorted_dims = map(list, zip(*sorted_results))
+        return sorted_centroids, sorted_dims
 
     @staticmethod
     def filter_close_cupholders_with_dims(
@@ -735,10 +758,15 @@ class ObjectDetection(Node):
         if not centroids:
             if method != "fused":
                 self.cupholder_marker_pub.publish(MarkerArray())
+                self.cupholder_marker_legacy_pub.publish(MarkerArray())
             return []
 
         matched = self.match_detections_to_previous(centroids)
         matched = sorted(matched, key=lambda x: x[0])
+
+        x_values = [float(c[0]) for _, c in matched]
+        x_center = sum(x_values) / len(x_values) if x_values else 0.0
+        correction_factor = 0.1
 
         marker_array = MarkerArray()
         now = self.get_clock().now().to_msg()
@@ -746,6 +774,10 @@ class ObjectDetection(Node):
         method_offset = {"hough": 0, "pcl": 100, "fused": 200}.get(method, 0)
 
         for assigned_id, centroid in matched:
+            centroid_x = float(centroid[0]) + 0.005
+            centroid_y = float(centroid[1]) - 0.002
+            centroid_z = float(centroid[2])
+
             radius = 0.035
             height = 0.05
             if dims is not None and len(dims) > 0:
@@ -763,9 +795,9 @@ class ObjectDetection(Node):
             marker.id = method_offset + assigned_id
             marker.type = Marker.CYLINDER
             marker.action = Marker.ADD
-            marker.pose.position.x = float(centroid[0])
-            marker.pose.position.y = float(centroid[1])
-            marker.pose.position.z = float(centroid[2])
+            marker.pose.position.x = centroid_x
+            marker.pose.position.y = centroid_y
+            marker.pose.position.z = centroid_z
             marker.pose.orientation.w = 1.0
             marker.scale.x = radius * 2.0
             marker.scale.y = radius * 2.0
@@ -773,7 +805,7 @@ class ObjectDetection(Node):
             marker.color.a = 0.6
 
             if method == "hough":
-                marker.pose.position.z += 0.02
+                marker.pose.position.z += 0.025
                 marker.scale.z = 0.003
                 marker.color.r, marker.color.g, marker.color.b = (1.0, 1.0, 0.0)
             elif method == "pcl":
@@ -793,9 +825,9 @@ class ObjectDetection(Node):
                 text_marker.id = 1000 + assigned_id
                 text_marker.text = f"ch_{assigned_id + 1}"
                 text_marker.action = Marker.ADD
-                text_marker.pose.position.x = float(centroid[0])
-                text_marker.pose.position.y = float(centroid[1])
-                text_marker.pose.position.z = float(centroid[2]) + TEXT_HEIGHT_OFFSET
+                text_marker.pose.position.x = centroid_x
+                text_marker.pose.position.y = centroid_y
+                text_marker.pose.position.z = centroid_z + TEXT_HEIGHT_OFFSET
                 text_marker.pose.orientation.w = 1.0
                 text_marker.scale.x = 0.05
                 text_marker.scale.y = 0.05
@@ -806,15 +838,19 @@ class ObjectDetection(Node):
                 text_marker.color.a = 1.0
                 marker_array.markers.append(text_marker)
 
+                adjusted_x = centroid_x - (centroid_x - x_center) * correction_factor
                 det = DetectedObjects()
                 det.object_id = int(assigned_id + 1)
-                det.position = Point(x=float(centroid[0]), y=float(centroid[1]), z=float(centroid[2]))
+                det.position = Point(
+                    x=float(adjusted_x), y=float(centroid_y), z=float(centroid_z)
+                )
                 det.width = float(radius * 2.0)
                 det.thickness = float(radius * 2.0)
                 det.height = float(height)
                 self.cuph_detected_pub.publish(det)
 
         self.cupholder_marker_pub.publish(marker_array)
+        self.cupholder_marker_legacy_pub.publish(marker_array)
         return matched
 
     def draw_fused_labels_on_image(

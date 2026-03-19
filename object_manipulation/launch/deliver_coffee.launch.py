@@ -2,7 +2,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import TimerAction
+from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
 
@@ -21,6 +22,9 @@ def generate_launch_description():
 
     moveit_config = (
         MoveItConfigsBuilder("name", package_name="my_moveit_config")
+        .robot_description(file_path="config/name.urdf.xacro")
+        .robot_description_semantic(file_path="config/name.srdf")
+        .sensors_3d(file_path="config/sensors_3d.yaml")
         .planning_pipelines(
             default_planning_pipeline="ompl",
             pipelines=["ompl", "pilz_industrial_motion_planner"],
@@ -33,7 +37,17 @@ def generate_launch_description():
         executable="object_detection",
         name="object_detection",
         output="screen",
+        parameters=[{"pointcloud_topic": "/D415/barista_points"}],
         arguments=["--ros-args", "--log-level", "info"],
+    )
+    depth_to_points_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory("object_detection"),
+                "launch",
+                "depth_to_points.launch.py",
+            )
+        )
     )
 
     move_group_node = Node(
@@ -69,7 +83,10 @@ def generate_launch_description():
         name="rviz2",
         output="screen",
         arguments=["-d", rviz_config],
-        parameters=[{"use_sim_time": False}],
+        parameters=[
+            moveit_config.to_dict(),
+            {"use_sim_time": False},
+        ],
     )
 
     object_manipulation_node = Node(
@@ -93,6 +110,7 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            depth_to_points_launch,
             object_detection_node,
             move_group_node,
             add_scene_node,

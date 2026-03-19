@@ -21,6 +21,9 @@ def generate_launch_description():
 
     moveit_config = (
         MoveItConfigsBuilder("name", package_name="my_moveit_config")
+        .robot_description(file_path="config/name.urdf.xacro")
+        .robot_description_semantic(file_path="config/name.srdf")
+        .sensors_3d(file_path="config/sensors_3d.yaml")
         .planning_pipelines(
             default_planning_pipeline="ompl",
             pipelines=["ompl", "pilz_industrial_motion_planner"],
@@ -61,7 +64,7 @@ def generate_launch_description():
         name="rviz2",
         output="screen",
         arguments=["-d", rviz_config],
-        parameters=[{"use_sim_time": False}],
+        parameters=[moveit_config.to_dict(), {"use_sim_time": False}],
     )
 
     manipulation_node = Node(
