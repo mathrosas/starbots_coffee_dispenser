@@ -39,8 +39,6 @@ static const std::string REF_FRAME = "base_link";
 static const std::string CUPHOLDER_TOPIC = "/cup_holder_detected";
 static const std::string DELIVER_COFFEE_ACTION = "deliver_coffee";
 static const std::string OMPL_PIPELINE = "ompl";
-static const std::string PILZ_PIPELINE = "pilz_industrial_motion_planner";
-static const std::string PILZ_LIN = "LIN";
 static const std::string BT_STATUS_TOPIC = "/bt_node_status";
 static const std::string DEFAULT_BT_XML_REL_PATH =
     "/bt_config/deliver_coffee_tree.xml";
@@ -48,12 +46,12 @@ static const std::string DEFAULT_BT_XML_REL_PATH =
 // offsets / “magic numbers”:
 static constexpr double PREGRASP_Z_OFFSET = 0.20; // 20 cm above detected object
 static constexpr double APPROACH_Z_DELTA = 0.01;  // straight down
-static constexpr double PLACE_RETRY_Z_STEP = 0.002; // 2 mm per retry
+static constexpr double PLACE_RETRY_Z_STEP = 0.007; // main_kuralme retry step
 
 // project defaults for fixed-cup mode [0.260, 0.370, -0.007]
-static constexpr double FIXED_CUP_X = 0.299; // 0.300
-static constexpr double FIXED_CUP_Y = 0.331; // 0.330
-static constexpr double FIXED_CUP_Z = 0.035;
+static constexpr double FIXED_CUP_X = 0.270; // 0.300
+static constexpr double FIXED_CUP_Y = 0.300; // 0.330
+static constexpr double FIXED_CUP_Z = 0.135;
 
 class PickAndPlacePerception {
 public:
@@ -212,8 +210,6 @@ public:
     bt_goal_prepared_ = false;
     bt_place_failed_ = false;
     bt_rotated_to_place_ = false;
-    bt_pre_place_retry_index_ = 0;
-    bt_insert_retry_index_ = 0;
     clear_orientation_constraints();
 
     halt_bt_tree();
@@ -283,8 +279,11 @@ private:
   Plan gripper_trajectory_plan_;
   bool plan_success_gripper_{false};
 
-  Plan cartesian_lin_plan_;
-  bool plan_success_cartesian_{false};
+  std::vector<Pose> cartesian_waypoints_;
+  RobotTrajectory cartesian_trajectory_plan_;
+  const double jump_threshold_{0.0};
+  const double end_effector_step_{0.01};
+  double plan_fraction_robot_{0.0};
 
   int target_holder_id_{1};
   std::string bt_xml_path_;
@@ -301,8 +300,6 @@ private:
   bool bt_goal_prepared_{false};
   bool bt_place_failed_{false};
   bool bt_rotated_to_place_{false};
-  int bt_pre_place_retry_index_{0};
-  int bt_insert_retry_index_{0};
   moveit_msgs::msg::Constraints path_constraints_;
 
   double cup_x_{FIXED_CUP_X};
@@ -542,8 +539,6 @@ private:
   BT::NodeStatus bt_validate_detection() {
     bt_place_failed_ = false;
     bt_rotated_to_place_ = false;
-    bt_pre_place_retry_index_ = 0;
-    bt_insert_retry_index_ = 0;
     clear_orientation_constraints();
     return bt_acquire_target();
   }
@@ -574,16 +569,36 @@ private:
       }
       bt_rotated_to_place_ = true;
     }
+
+    constexpr int max_attempts = 2;
     apply_orientation_constraints();
-    const double retry_lift = bt_pre_place_retry_index_ * PLACE_RETRY_Z_STEP;
-    if (bt_move_pre_place(retry_lift) != BT::NodeStatus::SUCCESS) {
-      bt_pre_place_retry_index_++;
-      clear_orientation_constraints();
-      return BT::NodeStatus::FAILURE;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+      const double retry_lift = attempt * PLACE_RETRY_Z_STEP;
+      if (bt_move_pre_place(retry_lift) == BT::NodeStatus::SUCCESS) {
+        clear_orientation_constraints();
+        return BT::NodeStatus::SUCCESS;
+      }
+      RCLCPP_WARN(LOGGER, "Planning attempt %d/%d failed. Trying z=+%.1f mm",
+                  attempt + 1, max_attempts, retry_lift * 1000.0);
     }
-    bt_insert_retry_index_ = 0;
+
+    // main_kuralme-style extra retry from reset pose
+    RCLCPP_WARN(LOGGER,
+                "Pre-place retries exhausted. Resetting pose for one last attempt.");
     clear_orientation_constraints();
-    return BT::NodeStatus::SUCCESS;
+    if (bt_return_home() != BT::NodeStatus::SUCCESS) {
+      return bt_fail("Failed pre-place retries and reset-to-home");
+    }
+    if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
+      return bt_fail("Failed pre-place retries and rotate-after-reset");
+    }
+    apply_orientation_constraints();
+    if (bt_move_pre_place(0.0) == BT::NodeStatus::SUCCESS) {
+      clear_orientation_constraints();
+      return BT::NodeStatus::SUCCESS;
+    }
+    clear_orientation_constraints();
+    return bt_fail("Failed pre-place after internal retries");
   }
 
   BT::NodeStatus bt_place() {
@@ -767,13 +782,12 @@ private:
   BT::NodeStatus bt_move_pre_place(double retry_lift) {
     publish_feedback(active_goal_handle_, "pre_place", 0.72f,
                      active_holder_id_);
-    const double pre_place_z = place_z_ + PREGRASP_Z_OFFSET + 0.066 + retry_lift;
+    const double pre_place_z =
+        place_z_ + PREGRASP_Z_OFFSET + 0.066 + retry_lift;
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
                 place_x_, place_y_, pre_place_z);
-    RCLCPP_INFO(LOGGER,
-                "Pre-place retry index=%d, lift=%.1f mm (step=%.1f mm)",
-                bt_pre_place_retry_index_, retry_lift * 1000.0,
-                PLACE_RETRY_Z_STEP * 1000.0);
+    RCLCPP_INFO(LOGGER, "Pre-place lift=%.1f mm (step=%.1f mm)",
+                retry_lift * 1000.0, PLACE_RETRY_Z_STEP * 1000.0);
     setup_goal_pose_target(place_x_, place_y_, pre_place_z, -1.000, +0.000,
                            +0.000, +0.000);
     plan_trajectory_kinematics();
@@ -788,21 +802,15 @@ private:
   BT::NodeStatus bt_insert_cup() {
     publish_feedback(active_goal_handle_, "insert_cup", 0.82f,
                      active_holder_id_);
-    const double pre_place_lift =
-        bt_pre_place_retry_index_ * PLACE_RETRY_Z_STEP;
-    const double insert_delta = APPROACH_Z_DELTA + 0.5 * pre_place_lift;
+    const double insert_delta = APPROACH_Z_DELTA;
     RCLCPP_INFO(LOGGER,
                 "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
                 place_x_, place_y_,
                 place_z_ + PREGRASP_Z_OFFSET + 0.066 - insert_delta);
-    RCLCPP_INFO(LOGGER,
-                "Insert retry index=%d (pre-place index=%d), descend=%.1f mm (base + half lift)",
-                bt_insert_retry_index_, bt_pre_place_retry_index_,
-                insert_delta * 1000.0);
+    RCLCPP_INFO(LOGGER, "Insert descend=%.1f mm", insert_delta * 1000.0);
     setup_waypoints_target(+0.000, +0.000, -insert_delta);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
-      bt_insert_retry_index_++;
       return bt_fail("Failed Cartesian insert to cupholder");
     }
     log_xy_error_to_holder("after_insert_cartesian", place_x_, place_y_,
@@ -1151,40 +1159,34 @@ private:
   }
 
   void setup_waypoints_target(float x_delta, float y_delta, float z_delta) {
-    // Pilz LIN requires goal frame == model/planning frame (typically "world").
-    move_group_robot_->setPoseReferenceFrame(
-        move_group_robot_->getPlanningFrame());
+    cartesian_waypoints_.clear();
     target_pose_robot_ = move_group_robot_->getCurrentPose().pose;
+    cartesian_waypoints_.push_back(target_pose_robot_);
     target_pose_robot_.position.x += x_delta;
     target_pose_robot_.position.y += y_delta;
     target_pose_robot_.position.z += z_delta;
-    move_group_robot_->setStartStateToCurrentState();
-    move_group_robot_->setPoseTarget(target_pose_robot_);
+    cartesian_waypoints_.push_back(target_pose_robot_);
   }
 
   void plan_trajectory_cartesian() {
-    // Use Pilz LIN for deterministic straight-line TCP moves.
-    move_group_robot_->setPoseReferenceFrame(
-        move_group_robot_->getPlanningFrame());
-    move_group_robot_->setPlanningPipelineId(PILZ_PIPELINE);
-    move_group_robot_->setPlannerId(PILZ_LIN);
-    plan_success_cartesian_ = (move_group_robot_->plan(cartesian_lin_plan_) ==
-                               moveit::core::MoveItErrorCode::SUCCESS);
+    plan_fraction_robot_ = move_group_robot_->computeCartesianPath(
+        cartesian_waypoints_, end_effector_step_, jump_threshold_,
+        cartesian_trajectory_plan_);
   }
 
   bool execute_trajectory_cartesian() {
-    if (plan_success_cartesian_) {
+    if (plan_fraction_robot_ >= 0.0) {
       log_ee_and_joints("pre_execute_cartesian");
-      auto code = move_group_robot_->execute(cartesian_lin_plan_);
+      auto code = move_group_robot_->execute(cartesian_trajectory_plan_);
       if (code != moveit::core::MoveItErrorCode::SUCCESS) {
-        RCLCPP_ERROR(LOGGER, "Robot LIN Trajectory Execute Failed !");
+        RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Execute Failed !");
         return false;
       }
-      RCLCPP_INFO(LOGGER, "Robot LIN Trajectory Success !");
+      RCLCPP_INFO(LOGGER, "Robot Cartesian Trajectory Success !");
       log_ee_and_joints("post_execute_cartesian");
       return true;
     }
-    RCLCPP_ERROR(LOGGER, "Robot LIN Trajectory Planning Failed !");
+    RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Planning Failed !");
     return false;
   }
 
