@@ -21,6 +21,7 @@
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <memory>
 #include <mutex>
@@ -44,8 +45,8 @@ static const std::string DEFAULT_BT_XML_REL_PATH =
     "/bt_config/deliver_coffee_tree.xml";
 
 // offsets / “magic numbers”:
-static constexpr double PREGRASP_Z_OFFSET = 0.20; // 20 cm above detected object
-static constexpr double APPROACH_Z_DELTA = 0.01;  // straight down
+static constexpr double PREGRASP_Z_OFFSET = 0.30; // 30 cm above detected object
+static constexpr double APPROACH_Z_DELTA = 0.10;  // straight down
 static constexpr double PLACE_RETRY_Z_STEP = 0.007; // main_kuralme retry step
 
 // project defaults for fixed-cup mode [0.260, 0.370, -0.007]
@@ -546,22 +547,41 @@ private:
   BT::NodeStatus bt_pre_pick() { return bt_move_pregrasp(); }
 
   BT::NodeStatus bt_pick() {
-    if (bt_open_gripper() != BT::NodeStatus::SUCCESS) {
-      return BT::NodeStatus::FAILURE;
-    }
-    if (bt_approach_cup() != BT::NodeStatus::SUCCESS) {
-      return BT::NodeStatus::FAILURE;
-    }
-    if (bt_close_gripper() != BT::NodeStatus::SUCCESS) {
-      return BT::NodeStatus::FAILURE;
-    }
-    if (bt_retreat_with_cup() != BT::NodeStatus::SUCCESS) {
-      return BT::NodeStatus::FAILURE;
+    auto future_result = std::async(std::launch::async, [this]() {
+      if (bt_open_gripper() != BT::NodeStatus::SUCCESS) {
+        return BT::NodeStatus::FAILURE;
+      }
+      if (bt_approach_cup() != BT::NodeStatus::SUCCESS) {
+        return BT::NodeStatus::FAILURE;
+      }
+      if (bt_close_gripper() != BT::NodeStatus::SUCCESS) {
+        return BT::NodeStatus::FAILURE;
+      }
+      if (bt_retreat_with_cup() != BT::NodeStatus::SUCCESS) {
+        return BT::NodeStatus::FAILURE;
+      }
+      return BT::NodeStatus::SUCCESS;
+    });
+
+    if (future_result.wait_for(std::chrono::seconds(60)) !=
+            std::future_status::ready ||
+        future_result.get() != BT::NodeStatus::SUCCESS) {
+      move_group_robot_->stop();
+      return bt_fail("Pick cup failed or timed out");
     }
     return BT::NodeStatus::SUCCESS;
   }
 
   BT::NodeStatus bt_pre_place() {
+    auto run_pre_place_with_timeout = [this]() {
+      auto future_result = std::async(std::launch::async, [this]() {
+        return bt_move_pre_place(0.0) == BT::NodeStatus::SUCCESS;
+      });
+      return future_result.wait_for(std::chrono::seconds(60)) ==
+                 std::future_status::ready &&
+             future_result.get();
+    };
+
     if (!bt_rotated_to_place_) {
       clear_orientation_constraints();
       if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
@@ -570,35 +590,28 @@ private:
       bt_rotated_to_place_ = true;
     }
 
-    constexpr int max_attempts = 2;
     apply_orientation_constraints();
-    for (int attempt = 0; attempt < max_attempts; ++attempt) {
-      const double retry_lift = attempt * PLACE_RETRY_Z_STEP;
-      if (bt_move_pre_place(retry_lift) == BT::NodeStatus::SUCCESS) {
+    if (!run_pre_place_with_timeout()) {
+      try {
+        // Home pose is not guaranteed to satisfy gripper-down constraints.
         clear_orientation_constraints();
-        return BT::NodeStatus::SUCCESS;
+        if (!goto_predefined_pose("home")) {
+          throw std::runtime_error("home");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        apply_orientation_constraints();
+        if (!run_pre_place_with_timeout()) {
+          throw std::runtime_error("pre_place");
+        }
+      } catch (const std::exception &) {
+        move_group_robot_->stop();
+        clear_orientation_constraints();
+        return bt_fail("Attempt to reach pre-place failed or timed out");
       }
-      RCLCPP_WARN(LOGGER, "Planning attempt %d/%d failed. Trying z=+%.1f mm",
-                  attempt + 1, max_attempts, retry_lift * 1000.0);
     }
 
-    // main_kuralme-style extra retry from reset pose
-    RCLCPP_WARN(LOGGER,
-                "Pre-place retries exhausted. Resetting pose for one last attempt.");
     clear_orientation_constraints();
-    if (bt_return_home() != BT::NodeStatus::SUCCESS) {
-      return bt_fail("Failed pre-place retries and reset-to-home");
-    }
-    if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
-      return bt_fail("Failed pre-place retries and rotate-after-reset");
-    }
-    apply_orientation_constraints();
-    if (bt_move_pre_place(0.0) == BT::NodeStatus::SUCCESS) {
-      clear_orientation_constraints();
-      return BT::NodeStatus::SUCCESS;
-    }
-    clear_orientation_constraints();
-    return bt_fail("Failed pre-place after internal retries");
+    return BT::NodeStatus::SUCCESS;
   }
 
   BT::NodeStatus bt_place() {
@@ -623,8 +636,13 @@ private:
     bt_place_failed_ = true;
     apply_orientation_constraints();
     const auto status = bt_put_cup_back_fixed();
+    if (status != BT::NodeStatus::SUCCESS) {
+      move_group_robot_->stop();
+      clear_orientation_constraints();
+      return bt_fail("Put-back failed or timed out");
+    }
     clear_orientation_constraints();
-    return status;
+    return BT::NodeStatus::SUCCESS;
   }
 
   BT::NodeStatus bt_return() {
@@ -782,8 +800,7 @@ private:
   BT::NodeStatus bt_move_pre_place(double retry_lift) {
     publish_feedback(active_goal_handle_, "pre_place", 0.72f,
                      active_holder_id_);
-    const double pre_place_z =
-        place_z_ + PREGRASP_Z_OFFSET + 0.066 + retry_lift;
+    const double pre_place_z = place_z_ + PREGRASP_Z_OFFSET + retry_lift;
     RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
                 place_x_, place_y_, pre_place_z);
     RCLCPP_INFO(LOGGER, "Pre-place lift=%.1f mm (step=%.1f mm)",
@@ -803,11 +820,10 @@ private:
     publish_feedback(active_goal_handle_, "insert_cup", 0.82f,
                      active_holder_id_);
     const double insert_delta = APPROACH_Z_DELTA;
-    RCLCPP_INFO(LOGGER,
-                "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
-                place_x_, place_y_,
-                place_z_ + PREGRASP_Z_OFFSET + 0.066 - insert_delta);
-    RCLCPP_INFO(LOGGER, "Insert descend=%.1f mm", insert_delta * 1000.0);
+    RCLCPP_INFO(
+        LOGGER, "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
+        place_x_, place_y_, place_z_ + PREGRASP_Z_OFFSET - insert_delta);
+    RCLCPP_INFO(LOGGER, "Insert descend=%.1f mm", insert_delta);
     setup_waypoints_target(+0.000, +0.000, -insert_delta);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
@@ -839,8 +855,8 @@ private:
                      active_holder_id_);
     RCLCPP_INFO(LOGGER,
                 "Going to Pre-place Position Again (%.3f, %.3f, %.3f)...",
-                place_x_, place_y_, place_z_ + 3 * PREGRASP_Z_OFFSET);
-    setup_goal_pose_target(place_x_, place_y_, place_z_ + 3 * PREGRASP_Z_OFFSET,
+                place_x_, place_y_, place_z_ + PREGRASP_Z_OFFSET);
+    setup_goal_pose_target(place_x_, place_y_, place_z_ + PREGRASP_Z_OFFSET,
                            -1.000, +0.000, +0.000, +0.000);
     plan_trajectory_kinematics();
     if (!execute_trajectory_kinematics()) {
@@ -864,6 +880,15 @@ private:
     publish_feedback(active_goal_handle_, "returned_home", 1.0f,
                      active_holder_id_);
     return BT::NodeStatus::SUCCESS;
+  }
+
+  bool goto_predefined_pose(const std::string &pose_name) {
+    RCLCPP_INFO(LOGGER, "Going to '%s' Pose...", pose_name.c_str());
+    move_group_robot_->setPlanningPipelineId(OMPL_PIPELINE);
+    move_group_robot_->setStartStateToCurrentState();
+    move_group_robot_->setNamedTarget(pose_name);
+    plan_trajectory_kinematics();
+    return execute_trajectory_kinematics();
   }
 
   BT::NodeStatus bt_go_safe_pose() {
@@ -897,33 +922,47 @@ private:
     publish_feedback(active_goal_handle_, "rotate_recovery_putback", 0.66f,
                      active_holder_id_);
 
-    // Best-effort put-back routine to avoid carrying the cup into next retry.
-    setup_goal_pose_target(pre_x_, pre_y_, pre_z_, -1.000, +0.000, +0.000,
-                           +0.000);
-    plan_trajectory_kinematics();
-    if (!execute_trajectory_kinematics()) {
+    auto move_above_fixed_cup = [this]() {
+      setup_goal_pose_target(pre_x_, pre_y_, pre_z_, -1.000, +0.000, +0.000,
+                             +0.000);
+      plan_trajectory_kinematics();
+      return execute_trajectory_kinematics();
+    };
+
+    if (!move_above_fixed_cup()) {
       RCLCPP_WARN(LOGGER,
-                  "BT rotate recovery: failed moving above fixed cup pose.");
+                  "BT rotate recovery: initial move above fixed cup failed. "
+                  "Trying intermediate fallback.");
+      setup_goal_pose_target(-0.200, +0.150, +0.400, -1.000, +0.000, +0.000,
+                             +0.000);
+      plan_trajectory_kinematics();
+      if (!execute_trajectory_kinematics()) {
+        return bt_fail(
+            "BT rotate recovery: failed moving to intermediate fallback pose");
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+      if (!move_above_fixed_cup()) {
+        return bt_fail("BT rotate recovery: failed moving above fixed cup pose "
+                       "after fallback");
+      }
     }
 
     setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
-      RCLCPP_WARN(LOGGER, "BT rotate recovery: failed descending to put-back.");
+      return bt_fail("BT rotate recovery: failed descending to put-back");
     }
 
     setup_named_pose_gripper("open");
     plan_trajectory_gripper();
     if (!execute_trajectory_gripper()) {
-      RCLCPP_WARN(LOGGER,
-                  "BT rotate recovery: failed opening gripper at put-back.");
+      return bt_fail("BT rotate recovery: failed opening gripper at put-back");
     }
 
     setup_waypoints_target(+0.000, +0.000, +APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
-      RCLCPP_WARN(LOGGER,
-                  "BT rotate recovery: failed retreating after put-back.");
+      return bt_fail("BT rotate recovery: failed retreating after put-back");
     }
 
     return BT::NodeStatus::SUCCESS;
@@ -1110,6 +1149,7 @@ private:
 
     path_constraints_.orientation_constraints.clear();
     path_constraints_.orientation_constraints.push_back(ocm);
+    move_group_robot_->setPlannerId("KPIECEkConfigDefault");
     move_group_robot_->setPathConstraints(path_constraints_);
     RCLCPP_INFO(LOGGER, "Applied orientation constraints (gripper-down).");
   }
@@ -1117,6 +1157,7 @@ private:
   void clear_orientation_constraints() {
     path_constraints_.orientation_constraints.clear();
     move_group_robot_->setPathConstraints(path_constraints_);
+    move_group_robot_->setPlannerId("BiTRRTkConfigDefault");
   }
 
   void setup_goal_pose_target(float pos_x, float pos_y, float pos_z,
@@ -1162,6 +1203,10 @@ private:
     cartesian_waypoints_.clear();
     target_pose_robot_ = move_group_robot_->getCurrentPose().pose;
     cartesian_waypoints_.push_back(target_pose_robot_);
+    target_pose_robot_.orientation.x = -1.0;
+    target_pose_robot_.orientation.y = 0.0;
+    target_pose_robot_.orientation.z = 0.0;
+    target_pose_robot_.orientation.w = 0.0;
     target_pose_robot_.position.x += x_delta;
     target_pose_robot_.position.y += y_delta;
     target_pose_robot_.position.z += z_delta;
