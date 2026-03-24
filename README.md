@@ -39,7 +39,7 @@ Terminal 3 (send a request):
 
 ```bash
 source ~/ros2_ws/install/setup.bash
-ros2 action send_goal /deliver_coffee custom_msgs/action/DeliverCoffee "{cupholder_id: 1}" --feedback
+ros2 action send_goal /deliver_cup custom_msgs/action/DeliverCoffee "{cupholder_id: 1}" --feedback
 ```
 
 ## One-time Setup (host machine)
@@ -129,7 +129,7 @@ If startup fails once, stop and relaunch the simulation. In this project that is
 ros2 topic list | grep -E "depth|camera|point"
 ```
 
-This is useful before sending `/deliver_coffee` goals.
+This is useful before sending `/deliver_cup` goals.
 
 ## Real robot note (Zenoh)
 
@@ -147,7 +147,7 @@ ros2 topic list
 
 ## Troubleshooting notes
 
-- `deliver_coffee` does nothing:
+- `deliver_cup` does nothing:
   - confirm controllers are `active`
   - confirm `/joint_states` is publishing
   - relaunch `object_manipulation deliver_coffee.launch.py`

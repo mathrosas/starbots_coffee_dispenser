@@ -23,10 +23,25 @@ find_package(moveit_msgs REQUIRED)
 find_package(moveit_visual_tools REQUIRED)
 find_package(std_msgs REQUIRED)
 
-add_executable(add_coffee_scene src/add_coffee_scene.cpp)
-add_executable(object_manipulation src/object_manipulation.cpp)
+add_executable(add_cafeteria_scene src/add_cafeteria_scene.cpp)
+add_executable(object_manipulation
+  src/bt_main.cpp
+  src/object_manipulation.cpp
+  src/bt_nodes/goal_not_canceled_node.cpp
+  src/bt_nodes/validate_detection_node.cpp
+  src/bt_nodes/prepick_node.cpp
+  src/bt_nodes/pick_node.cpp
+  src/bt_nodes/preplace_node.cpp
+  src/bt_nodes/place_node.cpp
+  src/bt_nodes/putback_node.cpp
+  src/bt_nodes/return_node.cpp
+)
 
-ament_target_dependencies(add_coffee_scene
+target_include_directories(object_manipulation PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+ament_target_dependencies(add_cafeteria_scene
 	ament_cmake
 	rclcpp
 	moveit_ros_planning_interface)
@@ -46,12 +61,16 @@ ament_target_dependencies(object_manipulation
     moveit_msgs
     std_msgs)
 
-install(TARGETS object_manipulation add_coffee_scene
+install(TARGETS object_manipulation add_cafeteria_scene
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY launch bt_config
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 ament_package()

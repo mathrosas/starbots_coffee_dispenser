@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 
-from collections import defaultdict, deque
+from typing import List, Optional, Tuple
+
 import cv2
 import numpy as np
 import rclpy
-import tf2_ros
 import tf2_geometry_msgs
+import tf2_ros
+from builtin_interfaces.msg import Duration
 from cv_bridge import CvBridge
-from message_filters import ApproximateTimeSynchronizer, Subscriber
+from geometry_msgs.msg import Point, PointStamped
 from rclpy.duration import Duration as RclDuration
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2
-from geometry_msgs.msg import Point, PointStamped
-from std_msgs.msg import Float32MultiArray
-from visualization_msgs.msg import Marker, MarkerArray
-from builtin_interfaces.msg import Duration
 from tf2_ros import ConnectivityException, TransformException
-from typing import List, Optional, Tuple
+from visualization_msgs.msg import Marker, MarkerArray
 
 from custom_msgs.msg import DetectedObjects, DetectedSurfaces
 
@@ -26,124 +24,49 @@ try:
 except ImportError:
     pcl = None
 
-ROI_MIN_X, ROI_MAX_X = -0.7, -0.2
-ROI_MIN_Y, ROI_MAX_Y = -0.2, 0.5
-ROI_MIN_Z, ROI_MAX_Z = -0.6, -0.3
-
-BELOW_BAND = 0.06
-Z_GAP_MIN = 0.02
-TRAY_RADIUS_CAP = 0.15
-
-CUP_MIN_RADIUS = 0.01
-CUP_MAX_RADIUS = 0.04
-CUP_MIN_HEIGHT = 0.005
-CUP_MAX_HEIGHT = 0.04
-
-CLUSTER_TOLERANCE = 0.04
-MIN_CLUSTER_SIZE = 30
-MAX_CLUSTER_SIZE = 100000
-MIN_CENTROID_DISTANCE = 0.05
-
-OCCUPANCY_Z_MARGIN = 0.03
-OCCUPANCY_RADIUS_PAD = 0.01
-OCCUPANCY_PTS_THRESH = 10
-
-CUPHOLDER_OFFSET_X = 0.0
-CUPHOLDER_OFFSET_Y = 0.0
-CUPHOLDER_OFFSET_Z = 0.0
-
-HOUGH_OFFSET_Y = 0.0
-HOUGH_OFFSET_Z = 0.0
-
-FUSION_WEIGHT_HOUGH = 0.4
-FUSION_WEIGHT_PCL = 0.6
-FUSION_MATCH_THRESHOLD = 0.03
-
-TRAY_MARKER_HEIGHT = 0.09
-TEXT_HEIGHT_OFFSET = 0.1
-TRACK_WINDOW_SEC = 1.2
-TRACK_TIMEOUT_SEC = 30.0
-TRACK_MIN_STABLE_SAMPLES = 3
-TRACK_MAX_STD_XY = 0.010
-TRACK_MAX_STD_Z = 0.012
-
 
 class ObjectDetection(Node):
     def __init__(self) -> None:
         super().__init__("object_detection_node")
 
-        # Optional runtime params (kept minimal)
         self.declare_parameter("pointcloud_topic", "/D415/barista_points")
-        self.declare_parameter("hough_dp", 1.6)
-        self.declare_parameter("hough_min_dist", 20)
-        self.declare_parameter("hough_param1", 162)
-        self.declare_parameter("hough_param2", 30)
-        self.declare_parameter("hough_min_radius", 10)
-        self.declare_parameter("hough_max_radius", 18)
-        self.declare_parameter("hough_gauss_k", 6)
-        # Keep temporal confidence, but do not block downstream behavior by default.
-        self.declare_parameter("publish_stable_only", False)
-        self.declare_parameter("min_publish_confidence", 0.0)
-        self.declare_parameter("id_match_threshold", 0.08)
-        self.declare_parameter("fused_ema_alpha", 0.35)
-        self.declare_parameter("max_frame_jump_m", 0.04)
-
         pointcloud_topic = str(self.get_parameter("pointcloud_topic").value)
-        self.publish_stable_only = bool(
-            self.get_parameter("publish_stable_only").value
-        )
-        self.min_publish_confidence = float(
-            self.get_parameter("min_publish_confidence").value
-        )
-        self.id_match_threshold = float(self.get_parameter("id_match_threshold").value)
-        self.fused_ema_alpha = float(self.get_parameter("fused_ema_alpha").value)
-        self.max_frame_jump_m = float(self.get_parameter("max_frame_jump_m").value)
 
-        # Publishers
         self.annot_pub = self.create_publisher(Image, "barista_cam_annotated", 10)
         self.annot_legacy_pub = self.create_publisher(Image, "tray_cam_annotated", 10)
-        self.tray_marker_pub = self.create_publisher(MarkerArray, "/tray_marker", 10)
-        self.cupholder_marker_pub = self.create_publisher(
-            MarkerArray, "/cup_holder_markers", 10
-        )
-        self.cupholder_marker_legacy_pub = self.create_publisher(
-            MarkerArray, "/cup_holder_marker", 10
-        )
         self.tray_detected_pub = self.create_publisher(DetectedSurfaces, "/tray_detected", 10)
+        self.tray_marker_pub = self.create_publisher(MarkerArray, "/tray_marker", 10)
+        self.cupholder_marker_pub = self.create_publisher(MarkerArray, "/cup_holder_markers", 10)
+        self.cupholder_marker_legacy_pub = self.create_publisher(MarkerArray, "/cup_holder_marker", 10)
         self.cuph_detected_pub = self.create_publisher(DetectedObjects, "/cup_holder_detected", 10)
-        self.cuph_confidence_pub = self.create_publisher(
-            Float32MultiArray, "/cup_holder_detection_confidence", 10
-        )
 
-        # Subscriptions: synchronized RGB+Depth+CameraInfo and point cloud.
-        self.sensor_qos = qos_profile_sensor_data
-        self.rgb_sub = Subscriber(
-            self, Image, "/D415/color/image_raw", qos_profile=self.sensor_qos
+        self.create_subscription(
+            Image, "/D415/color/image_raw", self.image_callback, qos_profile_sensor_data
         )
-        self.depth_sub = Subscriber(
-            self,
+        self.create_subscription(
             Image,
             "/D415/aligned_depth_to_color/image_raw",
-            qos_profile=self.sensor_qos,
+            self.depth_callback,
+            qos_profile_sensor_data,
         )
-        self.caminfo_sub = Subscriber(
-            self,
+        self.create_subscription(
             CameraInfo,
             "/D415/aligned_depth_to_color/camera_info",
-            qos_profile=self.sensor_qos,
+            self.caminfo_callback,
+            qos_profile_sensor_data,
         )
-        self.rgbd_sync = ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.depth_sub, self.caminfo_sub], queue_size=20, slop=0.05
-        )
-        self.rgbd_sync.registerCallback(self.synced_rgbd_callback)
         self.create_subscription(
-            PointCloud2, pointcloud_topic, self.pc_callback, self.sensor_qos
+            PointCloud2, pointcloud_topic, self.pc_callback, qos_profile_sensor_data
         )
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.bridge = CvBridge()
+        self.pc_centroids: List[List[float]] = []
+        self.occupied_pcl_centroids: List[List[float]] = []
+        self.hough_centroids: List[List[float]] = []
+        self.prev_detections: List[Tuple[int, List[float]]] = []
         self.K: Optional[np.ndarray] = None
         self.last_depth: Optional[np.ndarray] = None
         self.depth_scale = 0.001
@@ -151,37 +74,21 @@ class ObjectDetection(Node):
         self.min_depth_m = 0.02
         self.max_depth_m = 3.0
 
-        self.pc_centroids: List[List[float]] = []
-        self.pc_dims: List[List[float]] = []
-        self.occupied_pcl_centroids: List[List[float]] = []
-        self.hough_centroids: List[List[float]] = []
+        self.weight_hough = 0.4
+        self.weight_pcl = 0.6
+        self.fuse_threshold = 0.03
 
-        self.prev_detections: List[Tuple[int, List[float]]] = []
-        self._logged_no_pcl_backend = False
-        self.track_positions = defaultdict(lambda: deque(maxlen=20))
-        self.track_times = defaultdict(lambda: deque(maxlen=20))
-        self.filtered_positions = {}
+        self.dp = 1.6
+        self.minDist = 20
+        self.param1 = 162
+        self.param2 = 30
+        self.minRadius = 10
+        self.maxRadius = 18
+        self.gauss_k = 6
 
         self.get_logger().info("Object detection initialized")
 
-    # ---------- Camera/depth branch ----------
-    def synced_rgbd_callback(
-        self, image_msg: Image, depth_msg: Image, caminfo_msg: CameraInfo
-    ) -> None:
-        if self.K is None:
-            self.K = np.array(caminfo_msg.k, dtype=float).reshape(3, 3)
-            self.get_logger().info("Camera intrinsics loaded")
-
-        depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
-        if depth_img is None:
-            return
-        if depth_img.dtype == np.uint16:
-            self.last_depth = depth_img.astype(np.float32) * self.depth_scale
-        else:
-            self.last_depth = depth_img.astype(np.float32)
-
-        self.image_callback(image_msg)
-
+    # ---------- Camera / depth ----------
     def caminfo_callback(self, msg: CameraInfo) -> None:
         if self.K is None:
             self.K = np.array(msg.k, dtype=float).reshape(3, 3)
@@ -207,26 +114,22 @@ class ObjectDetection(Node):
         h_img, w_img = gray.shape[:2]
         crop_w = 3 * w_img // 4
         proc_gray = gray[:, :crop_w]
-        x_off = 0
 
-        k = int(self.get_parameter("hough_gauss_k").value)
-        if k % 2 == 0:
-            k += 1
-        k = max(1, k)
+        k = self.gauss_k if (self.gauss_k % 2 == 1) else self.gauss_k + 1
         gray_blur = cv2.GaussianBlur(proc_gray, (k, k), 0) if k > 1 else proc_gray
 
         circles = cv2.HoughCircles(
             gray_blur,
             cv2.HOUGH_GRADIENT,
-            dp=float(self.get_parameter("hough_dp").value),
-            minDist=float(self.get_parameter("hough_min_dist").value),
-            param1=float(self.get_parameter("hough_param1").value),
-            param2=float(self.get_parameter("hough_param2").value),
-            minRadius=int(self.get_parameter("hough_min_radius").value),
-            maxRadius=int(self.get_parameter("hough_max_radius").value),
+            self.dp,
+            self.minDist,
+            param1=self.param1,
+            param2=self.param2,
+            minRadius=self.minRadius,
+            maxRadius=self.maxRadius,
         )
 
-        hough: List[List[float]] = []
+        self.hough_centroids = []
         cam_frame = msg.header.frame_id
         now_msg = self.get_clock().now().to_msg()
 
@@ -235,11 +138,11 @@ class ObjectDetection(Node):
             for c in circles:
                 u_local, v_local = int(round(c[0])), int(round(c[1]))
                 r_px = float(c[2])
-                u = u_local + x_off
+                u = u_local
                 v = v_local
 
-                cv2.circle(annotated, (u, v), int(round(r_px)), (255, 0, 0), 2)
-                cv2.circle(annotated, (u, v), 3, (255, 0, 0), -1)
+                cv2.circle(annotated, (u, v), int(round(r_px)), (0, 255, 0), 2)
+                cv2.circle(annotated, (u, v), 3, (0, 0, 255), -1)
 
                 xyz = self.pixel_to_3d(u, v)
                 if xyz is None:
@@ -255,24 +158,21 @@ class ObjectDetection(Node):
                         "base_link", cam_frame, rclpy.time.Time()
                     )
                     ps_out = tf2_geometry_msgs.do_transform_point(ps, tf)
-                    ps_out.point.y += HOUGH_OFFSET_Y
-                    ps_out.point.z += HOUGH_OFFSET_Z
-                    hough.append([ps_out.point.x, ps_out.point.y, ps_out.point.z])
+                    self.hough_centroids.append(
+                        [ps_out.point.x, ps_out.point.y, ps_out.point.z]
+                    )
                 except Exception as exc:
                     self.get_logger().warn(f"TF transform failed: {exc}")
                     continue
 
-        # Remove holes that look occupied from PCL analysis.
         self.hough_centroids = [
             h
-            for h in hough
-            if not any(np.linalg.norm(np.asarray(h) - np.asarray(occ)) < 0.04
-                       for occ in self.occupied_pcl_centroids)
+            for h in self.hough_centroids
+            if not any(
+                np.linalg.norm(np.array(h) - np.array(occ)) < 0.04
+                for occ in self.occupied_pcl_centroids
+            )
         ]
-
-        self.publish_cupholders(self.hough_centroids, method="hough")
-        fused_labeled = self.fuse_detections()
-        self.draw_fused_labels_on_image(annotated, fused_labeled, cam_frame)
 
         try:
             out = self.bridge.cv2_to_imgmsg(annotated, encoding="bgr8")
@@ -281,6 +181,9 @@ class ObjectDetection(Node):
             self.annot_legacy_pub.publish(out)
         except Exception as exc:
             self.get_logger().warn(f"Failed to publish annotated image: {exc}")
+
+        self.publish_cupholders(self.hough_centroids, method="hough")
+        self.fuse_detections()
 
     def pixel_to_3d(self, u: int, v: int) -> Optional[Tuple[float, float, float]]:
         if self.K is None or self.last_depth is None:
@@ -312,108 +215,165 @@ class ObjectDetection(Node):
 
         return None
 
-    # ---------- Pointcloud branch ----------
+    # ---------- Fusion ----------
+    def fuse_detections(self) -> None:
+        if not self.pc_centroids and not self.hough_centroids:
+            return
+
+        fused: List[List[float]] = []
+        if not self.pc_centroids:
+            fused = self.hough_centroids
+        elif not self.hough_centroids:
+            fused = self.pc_centroids
+        else:
+            for h in self.hough_centroids:
+                for p in self.pc_centroids:
+                    dist = np.linalg.norm(np.array(h) - np.array(p))
+                    if dist < self.fuse_threshold:
+                        wavg = [
+                            (h_i * self.weight_hough + p_i * self.weight_pcl)
+                            for h_i, p_i in zip(h, p)
+                        ]
+                        is_occupied = any(
+                            np.linalg.norm(np.array(wavg) - np.array(occ)) < 0.04
+                            for occ in self.occupied_pcl_centroids
+                        )
+                        if not is_occupied:
+                            fused.append(wavg)
+                        break
+
+        if fused:
+            self.publish_cupholders(fused, method="fused")
+
+    # ---------- Pointcloud ----------
     def pc_callback(self, msg: PointCloud2) -> None:
         if pcl is None:
-            if not self._logged_no_pcl_backend:
-                self.get_logger().error(
-                    "python-pcl not available. Cupholder detection requires PCL (no numpy fallback)."
-                )
-                self._logged_no_pcl_backend = True
+            self.get_logger().error(
+                "python-pcl not available. Cupholder detection requires PCL."
+            )
             return
 
-        cloud = self.from_ros_msg(msg)
-        if cloud.size == 0:
-            return
-
-        filtered = self.filter_roi(cloud)
-        if filtered.size == 0:
-            return
-
-        filtered_cloud = pcl.PointCloud()
-        filtered_cloud.from_array(filtered.astype(np.float32))
-
-        _, _, tray_cloud = self.extract_plane(filtered_cloud)
-        if tray_cloud.size == 0:
-            return
-
-        _, surface_centroids, surface_dimensions = self.extract_clusters(tray_cloud, "Tray Cloud")
-        if not surface_centroids:
-            return
-
-        cupholder_cloud = self.filter_below_surface(filtered_cloud, surface_centroids[0])
-        if cupholder_cloud.size == 0:
-            self.pc_centroids = []
-            self.pc_dims = []
-            self.publish_tray(surface_centroids, surface_dimensions)
-            return
-
-        centroids, dims = self.detect_cupholders_pcl(cupholder_cloud.to_array(), filtered)
-
-        self.pc_centroids = centroids
-        self.pc_dims = dims
-
-        self.publish_tray(surface_centroids, surface_dimensions)
-        self.publish_cupholders(self.pc_centroids, self.pc_dims, method="pcl")
-        self.fuse_detections()
-
-    def from_ros_msg(self, msg: PointCloud2) -> np.ndarray:
-        """Convert PointCloud2 to Nx3 in base_link."""
         try:
-            tf = self.tf_buffer.lookup_transform(
-                "base_link", msg.header.frame_id, rclpy.time.Time(),
+            self.occupied_pcl_centroids = []
+            cloud = self.from_ros_msg(msg)
+            if cloud is None or cloud.size == 0:
+                return
+
+            filtered_cloud = self.filter_cloud(
+                cloud,
+                min_x=-0.7,
+                max_x=-0.2,
+                min_y=-0.2,
+                max_y=0.5,
+                min_z=-0.6,
+                max_z=-0.3,
+            )
+            if filtered_cloud is None or filtered_cloud.size == 0:
+                return
+
+            _, _, tray_cloud = self.extract_plane(filtered_cloud)
+            if tray_cloud is None or tray_cloud.size == 0:
+                return
+
+            _, surface_centroids, surface_dimensions = self.extract_clusters(
+                tray_cloud, "Tray Cloud"
+            )
+            if not surface_centroids:
+                return
+
+            cupholder_cloud = self.filter_below_surface(filtered_cloud, surface_centroids[0])
+            cup_holder_centroids, cup_holder_dimensions = self.extract_cylinders(
+                cupholder_cloud, filtered_cloud
+            )
+
+            self.pc_centroids = cup_holder_centroids
+            self.publish_tray(surface_centroids, surface_dimensions)
+            self.publish_cupholders(
+                cup_holder_centroids,
+                dimensions=cup_holder_dimensions,
+                method="pcl",
+            )
+
+        except Exception as exc:
+            self.get_logger().error(f"Error in pc_callback: {exc}")
+
+    def from_ros_msg(self, msg: PointCloud2) -> Optional["pcl.PointCloud"]:
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                "base_link",
+                msg.header.frame_id,
+                rclpy.time.Time(),
                 timeout=RclDuration(seconds=1.0),
             )
 
             field_offsets = {f.name: f.offset for f in msg.fields}
             if not all(name in field_offsets for name in ("x", "y", "z")):
-                self.get_logger().error("PointCloud2 missing x/y/z fields.")
-                return np.empty((0, 3), dtype=np.float32)
+                self.get_logger().error("PointCloud2 missing x/y/z fields")
+                return None
 
             n_points = len(msg.data) // msg.point_step
             if n_points <= 0:
-                return np.empty((0, 3), dtype=np.float32)
+                return None
 
             f32 = np.dtype(">f4") if msg.is_bigendian else np.dtype("<f4")
             stride = (msg.point_step,)
-            x = np.ndarray((n_points,), dtype=f32, buffer=msg.data,
-                           offset=field_offsets["x"], strides=stride)
-            y = np.ndarray((n_points,), dtype=f32, buffer=msg.data,
-                           offset=field_offsets["y"], strides=stride)
-            z = np.ndarray((n_points,), dtype=f32, buffer=msg.data,
-                           offset=field_offsets["z"], strides=stride)
+            x = np.ndarray(
+                (n_points,),
+                dtype=f32,
+                buffer=msg.data,
+                offset=field_offsets["x"],
+                strides=stride,
+            )
+            y = np.ndarray(
+                (n_points,),
+                dtype=f32,
+                buffer=msg.data,
+                offset=field_offsets["y"],
+                strides=stride,
+            )
+            z = np.ndarray(
+                (n_points,),
+                dtype=f32,
+                buffer=msg.data,
+                offset=field_offsets["z"],
+                strides=stride,
+            )
 
-            pts = np.column_stack((x, y, z)).astype(np.float32, copy=False)
-            pts = pts[np.isfinite(pts).all(axis=1)]
-            if pts.size == 0:
-                return np.empty((0, 3), dtype=np.float32)
+            points = np.column_stack((x, y, z)).astype(np.float32, copy=False)
+            points = points[np.isfinite(points).all(axis=1)]
+            if points.size == 0:
+                return None
 
-            t = np.array(
+            translation = np.array(
                 [
-                    tf.transform.translation.x,
-                    tf.transform.translation.y,
-                    tf.transform.translation.z,
+                    transform.transform.translation.x,
+                    transform.transform.translation.y,
+                    transform.transform.translation.z,
                 ],
                 dtype=np.float32,
             )
-            q = np.array(
+            rotation_quaternion = np.array(
                 [
-                    tf.transform.rotation.x,
-                    tf.transform.rotation.y,
-                    tf.transform.rotation.z,
-                    tf.transform.rotation.w,
+                    transform.transform.rotation.x,
+                    transform.transform.rotation.y,
+                    transform.transform.rotation.z,
+                    transform.transform.rotation.w,
                 ],
                 dtype=np.float32,
             )
-            r = self.quaternion_to_rotation_matrix(q)
-            return (pts @ r.T) + t
+            rotation_matrix = self.quaternion_to_rotation_matrix(rotation_quaternion)
+            points_base = (points @ rotation_matrix.T) + translation
+
+            cloud = pcl.PointCloud()
+            cloud.from_array(points_base.astype(np.float32))
+            return cloud
 
         except (TransformException, ConnectivityException) as exc:
-            self.get_logger().warn(f"Transform lookup failed: {exc}")
-            return np.empty((0, 3), dtype=np.float32)
+            self.get_logger().error(f"Transform lookup failed: {exc}")
+            return None
         except Exception as exc:
             self.get_logger().error(f"Error in from_ros_msg: {exc}")
-            return np.empty((0, 3), dtype=np.float32)
+            return None
 
     @staticmethod
     def quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
@@ -428,36 +388,67 @@ class ObjectDetection(Node):
         )
 
     @staticmethod
-    def filter_roi(points: np.ndarray) -> np.ndarray:
-        keep = (
-            (points[:, 0] >= ROI_MIN_X) & (points[:, 0] <= ROI_MAX_X)
-            & (points[:, 1] >= ROI_MIN_Y) & (points[:, 1] <= ROI_MAX_Y)
-            & (points[:, 2] >= ROI_MIN_Z) & (points[:, 2] <= ROI_MAX_Z)
-        )
-        return points[keep]
+    def filter_cloud(
+        cloud: "pcl.PointCloud",
+        min_x: float,
+        max_x: float,
+        min_y: float,
+        max_y: float,
+        min_z: float,
+        max_z: float,
+    ) -> "pcl.PointCloud":
+        indices = []
+        for i in range(cloud.size):
+            pt = cloud[i]
+            if (
+                min_x <= pt[0] <= max_x
+                and min_y <= pt[1] <= max_y
+                and min_z <= pt[2] <= max_z
+            ):
+                indices.append(i)
+        return cloud.extract(indices)
 
+    @staticmethod
     def filter_below_surface(
-        self,
         cloud: "pcl.PointCloud",
         surface_centroid: List[float],
-        height_threshold: float = BELOW_BAND,
-        radius_limit: float = TRAY_RADIUS_CAP,
+        height_threshold: float = 0.06,
+        radius_limit: float = 0.15,
     ) -> "pcl.PointCloud":
-        filtered_indices: List[int] = []
-        centroid = surface_centroid
+        filtered_indices = []
 
         for i in range(cloud.size):
-            point = cloud[i]
-            x, y, z = point
-            if z < centroid[2] - Z_GAP_MIN and (centroid[2] - z) <= height_threshold:
-                distance_from_center = np.sqrt((x - centroid[0]) ** 2 + (y - centroid[1]) ** 2)
+            x, y, z = cloud[i]
+            if z < surface_centroid[2] - 0.02 and (surface_centroid[2] - z) <= height_threshold:
+                distance_from_center = np.sqrt(
+                    (x - surface_centroid[0]) ** 2 + (y - surface_centroid[1]) ** 2
+                )
                 if distance_from_center <= radius_limit:
                     filtered_indices.append(i)
 
         return cloud.extract(filtered_indices)
 
+    @staticmethod
+    def filter_close_cupholder(
+        centroids: List[List[float]], min_distance: float
+    ) -> List[List[float]]:
+        filtered_centroids: List[List[float]] = []
+
+        for centroid in centroids:
+            too_close = False
+            for existing in filtered_centroids:
+                distance = np.linalg.norm(np.array(centroid) - np.array(existing))
+                if distance < min_distance:
+                    too_close = True
+                    break
+            if not too_close:
+                filtered_centroids.append(centroid)
+
+        return filtered_centroids
+
+    @staticmethod
     def extract_plane(
-        self, cloud: "pcl.PointCloud"
+        cloud: "pcl.PointCloud",
     ) -> Tuple[np.ndarray, np.ndarray, "pcl.PointCloud"]:
         seg = cloud.make_segmenter_normals(ksearch=50)
         seg.set_optimize_coefficients(True)
@@ -466,30 +457,26 @@ class ObjectDetection(Node):
         seg.set_distance_threshold(0.01)
         indices, coefficients = seg.segment()
 
-        if indices is None or len(indices) == 0:
-            empty = pcl.PointCloud()
-            empty.from_array(np.empty((0, 3), dtype=np.float32))
-            return np.array([]), np.array([]), empty
-
         plane_cloud = cloud.extract(indices)
-        return np.array(indices), np.array(coefficients), plane_cloud
+        return np.asarray(indices), np.asarray(coefficients), plane_cloud
 
     def extract_clusters(
         self, cloud: "pcl.PointCloud", cluster_type: str
     ) -> Tuple[List["pcl.PointCloud"], List[List[float]], List[List[float]]]:
         tree = cloud.make_kdtree()
         ec = cloud.make_EuclideanClusterExtraction()
-        ec.set_ClusterTolerance(CLUSTER_TOLERANCE)
-        ec.set_MinClusterSize(MIN_CLUSTER_SIZE)
-        ec.set_MaxClusterSize(MAX_CLUSTER_SIZE)
+        ec.set_ClusterTolerance(0.04)
+        ec.set_MinClusterSize(30)
+        ec.set_MaxClusterSize(100000)
         ec.set_SearchMethod(tree)
+
         cluster_indices = ec.Extract()
 
         object_clusters: List["pcl.PointCloud"] = []
         cluster_centroids: List[List[float]] = []
         cluster_dimensions: List[List[float]] = []
 
-        for indices in cluster_indices:
+        for idx, indices in enumerate(cluster_indices):
             cluster = cloud.extract(indices)
             cluster_arr = cluster.to_array()
             if cluster_arr.shape[0] == 0:
@@ -504,170 +491,41 @@ class ObjectDetection(Node):
             cluster_centroids.append(centroid.tolist())
             cluster_dimensions.append(dimensions.tolist())
 
+            self.get_logger().info(
+                f"\\n=============================================\\n"
+                f"Plane Cluster {idx + 1} has {len(indices)} points:\\n"
+                f"Centroid of cluster {idx + 1}: {centroid}\\n"
+                f"Dimensions of {cluster_type} cluster {idx + 1}: {dimensions}"
+            )
+
         if not object_clusters:
             self.get_logger().warning(f"No {cluster_type} clusters extracted...")
 
         return object_clusters, cluster_centroids, cluster_dimensions
 
-    def estimate_tray(
-        self, roi: np.ndarray
-    ) -> Tuple[Optional[List[float]], Optional[List[float]], Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]]:
-        if roi.shape[0] < 30:
-            return None, None, None
-
-        z = roi[:, 2]
-        z_hi = float(np.percentile(z, 95))
-        top_seed = roi[np.abs(roi[:, 2] - z_hi) <= 0.02]
-        if top_seed.shape[0] < 30:
-            top_seed = roi
-
-        tray_frame, inlier_top = self.compute_tray_frame_ransac(top_seed)
-        if tray_frame is None or inlier_top.shape[0] < 20:
-            return None, None, None
-
-        top_uv = self.project_points_to_tray_uv(inlier_top, tray_frame)
-        center_uv = np.median(top_uv, axis=0)
-        radial_uv = np.linalg.norm(top_uv - center_uv[None, :], axis=1)
-        tray_r = float(np.percentile(radial_uv, 90))
-        tray_r = float(np.clip(tray_r, 0.08, TRAY_RADIUS_CAP))
-
-        center_xyz = self.tray_uv_to_world(center_uv, tray_frame)
-        center = [float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])]
-        dims = [2.0 * tray_r, 2.0 * tray_r, TRAY_MARKER_HEIGHT]
-        return center, dims, tray_frame
-
-    @staticmethod
-    def compute_tray_frame_ransac(
-        points: np.ndarray,
-    ) -> Tuple[Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]], np.ndarray]:
-        if points.shape[0] < 30:
-            return None, np.empty((0, 3), dtype=np.float32)
-
-        n_pts = points.shape[0]
-        best_count = 0
-        best_inliers = None
-        rng = np.random.default_rng()
-
-        for _ in range(120):
-            idx = rng.choice(n_pts, size=3, replace=False)
-            a, b, c = points[idx[0]], points[idx[1]], points[idx[2]]
-            n = np.cross(b - a, c - a)
-            norm_n = float(np.linalg.norm(n))
-            if norm_n < 1e-9:
-                continue
-            n = n / norm_n
-            if n[2] < 0.0:
-                n = -n
-
-            d = np.abs((points - a) @ n)
-            inliers = d <= 0.003
-            count = int(np.sum(inliers))
-            if count > best_count:
-                best_count = count
-                best_inliers = inliers
-
-        if best_inliers is None or best_count < 20:
-            return None, np.empty((0, 3), dtype=np.float32)
-
-        inlier_pts = points[best_inliers]
-        p0 = np.mean(inlier_pts, axis=0)
-        centered = inlier_pts - p0
-        cov = np.cov(centered.T)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        n = eigvecs[:, int(np.argmin(eigvals))]
-        n = n / max(1e-9, float(np.linalg.norm(n)))
-        if n[2] < 0.0:
-            n = -n
-
-        ux = np.asarray([1.0, 0.0, 0.0], dtype=float)
-        u = ux - np.dot(ux, n) * n
-        if np.linalg.norm(u) < 1e-6:
-            uy = np.asarray([0.0, 1.0, 0.0], dtype=float)
-            u = uy - np.dot(uy, n) * n
-        u = u / max(1e-9, float(np.linalg.norm(u)))
-        v = np.cross(n, u)
-        v = v / max(1e-9, float(np.linalg.norm(v)))
-
-        frame = (
-            np.asarray(p0, dtype=float),
-            np.asarray(u, dtype=float),
-            np.asarray(v, dtype=float),
-            np.asarray(n, dtype=float),
-        )
-        return frame, inlier_pts
-
-    @staticmethod
-    def project_points_to_tray_uv(
-        points: np.ndarray,
-        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
-    ) -> np.ndarray:
-        p0, u, v, _ = tray_frame
-        d = points - p0
-        return np.column_stack((d @ u, d @ v))
-
-    @staticmethod
-    def project_point_to_tray_uv(
-        point: np.ndarray,
-        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
-    ) -> np.ndarray:
-        p0, u, v, _ = tray_frame
-        d = point - p0
-        return np.asarray([float(np.dot(d, u)), float(np.dot(d, v))], dtype=float)
-
-    @staticmethod
-    def tray_uv_to_world(
-        uv: np.ndarray,
-        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
-    ) -> np.ndarray:
-        p0, u, v, _ = tray_frame
-        return p0 + float(uv[0]) * u + float(uv[1]) * v
-
-    def extract_below_tray_band(
+    def extract_cylinders(
         self,
-        roi: np.ndarray,
-        tray_center: List[float],
-        tray_frame: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
-    ) -> np.ndarray:
-        p0, u, v, n = tray_frame
-        d = roi - p0
-        uv = np.column_stack((d @ u, d @ v))
-        center_uv = self.project_point_to_tray_uv(np.asarray(tray_center, dtype=float), tray_frame)
-        radial_uv = np.linalg.norm(uv - center_uv[None, :], axis=1)
-        signed_dist = d @ n
-
-        keep = (
-            (signed_dist <= -Z_GAP_MIN)
-            & (signed_dist >= -BELOW_BAND)
-            & (radial_uv <= TRAY_RADIUS_CAP)
-        )
-        return roi[keep]
-
-    def detect_cupholders_pcl(
-        self,
-        candidate_points: np.ndarray,
-        reference_points: np.ndarray,
+        cupholder_cloud: "pcl.PointCloud",
+        filtered_cloud: "pcl.PointCloud",
+        min_distance: float = 0.05,
+        min_height: float = 0.005,
+        max_height: float = 0.04,
+        min_radius: float = 0.01,
+        max_radius: float = 0.04,
     ) -> Tuple[List[List[float]], List[List[float]]]:
-        if candidate_points.shape[0] < MIN_CLUSTER_SIZE:
-            self.occupied_pcl_centroids = []
-            return [], []
-
-        cloud = pcl.PointCloud()
-        cloud.from_array(candidate_points.astype(np.float32))
-
-        tree = cloud.make_kdtree()
-        ec = cloud.make_EuclideanClusterExtraction()
-        ec.set_ClusterTolerance(CLUSTER_TOLERANCE)
-        ec.set_MinClusterSize(MIN_CLUSTER_SIZE)
-        ec.set_MaxClusterSize(MAX_CLUSTER_SIZE)
+        tree = cupholder_cloud.make_kdtree()
+        ec = cupholder_cloud.make_EuclideanClusterExtraction()
+        ec.set_ClusterTolerance(0.04)
+        ec.set_MinClusterSize(30)
+        ec.set_MaxClusterSize(100000)
         ec.set_SearchMethod(tree)
         cluster_indices = ec.Extract()
 
-        centroids: List[List[float]] = []
-        dims_list: List[List[float]] = []
-        occupied: List[List[float]] = []
+        cupholder_centroids: List[List[float]] = []
+        cupholder_dimensions: List[List[float]] = []
 
-        for indices in cluster_indices:
-            cluster = cloud.extract(indices)
+        for idx, indices in enumerate(cluster_indices):
+            cluster = cupholder_cloud.extract(indices)
             cluster_arr = cluster.to_array()
             if cluster_arr.shape[0] == 0:
                 continue
@@ -675,251 +533,133 @@ class ObjectDetection(Node):
             centroid = np.mean(cluster_arr, axis=0)
             min_coords = np.min(cluster_arr, axis=0)
             max_coords = np.max(cluster_arr, axis=0)
-            dims = (max_coords - min_coords).astype(float)
+            dimensions = max_coords - min_coords
+            radius = dimensions[0] / 2.0
+            height = dimensions[2]
 
-            radius = float(dims[0]) / 2.0
-            height = float(dims[2])
-
-            radial = np.hypot(
-                reference_points[:, 0] - float(centroid[0]),
-                reference_points[:, 1] - float(centroid[1]),
-            )
-            points_above = np.sum(
-                (radial < (radius + OCCUPANCY_RADIUS_PAD))
-                & (
-                    reference_points[:, 2]
-                    > (float(centroid[2]) + height / 2.0 + OCCUPANCY_Z_MARGIN)
+            points_above = []
+            for i in range(filtered_cloud.size):
+                pt = filtered_cloud[i]
+                xy_dist = np.linalg.norm(pt[:2] - centroid[:2])
+                if xy_dist < radius + 0.01 and pt[2] > centroid[2] + height / 2.0 + 0.03:
+                    points_above.append(pt)
+            if len(points_above) > 10:
+                self.occupied_pcl_centroids.append(centroid.tolist())
+                self.get_logger().info(
+                    f"Skipping cluster {idx + 1}: likely occupied by a cup."
                 )
+                continue
+
+            if min_radius <= radius <= max_radius and min_height <= height <= max_height:
+                cupholder_centroids.append(centroid.tolist())
+                cupholder_dimensions.append(dimensions.tolist())
+
+            self.get_logger().info(
+                f"\\n=============================================\\n"
+                f"Cluster {idx + 1} has {len(indices)} points:\\n"
+                f"Centroid of cluster {idx + 1}: {centroid}\\n"
+                f"Radius of cluster {idx + 1}: {radius}\\n"
+                f"Height of cluster {idx + 1}: {height}"
             )
-            if int(points_above) > OCCUPANCY_PTS_THRESH:
-                occupied.append(centroid.tolist())
-                continue
 
-            if not (CUP_MIN_RADIUS <= radius <= CUP_MAX_RADIUS):
-                continue
-            if not (CUP_MIN_HEIGHT <= height <= CUP_MAX_HEIGHT):
-                continue
+        if not cupholder_centroids:
+            self.get_logger().warning("No cupholder-like clusters detected!")
 
-            centroid_adj = np.asarray(centroid, dtype=float).copy()
-            centroid_adj[0] += CUPHOLDER_OFFSET_X
-            centroid_adj[1] += CUPHOLDER_OFFSET_Y
-            centroid_adj[2] += CUPHOLDER_OFFSET_Z
+        cupholder_centroids = self.filter_close_cupholder(cupholder_centroids, min_distance)
 
-            centroids.append([float(centroid_adj[0]), float(centroid_adj[1]), float(centroid_adj[2])])
-            dims_list.append([float(dims[0]), float(dims[1]), float(dims[2])])
-
-        self.occupied_pcl_centroids = occupied
-        filtered_centroids, filtered_dims = self.filter_close_cupholders_with_dims(
-            centroids, dims_list, MIN_CENTROID_DISTANCE
-        )
         sorted_results = sorted(
-            zip(filtered_centroids, filtered_dims), key=lambda x: x[0][0]
+            zip(cupholder_centroids, cupholder_dimensions), key=lambda x: x[0][0]
         )
-        if not sorted_results:
-            return [], []
-        sorted_centroids, sorted_dims = map(list, zip(*sorted_results))
-        return sorted_centroids, sorted_dims
-
-    @staticmethod
-    def filter_close_cupholders_with_dims(
-        centroids: List[List[float]],
-        dims: List[List[float]],
-        min_distance: float,
-    ) -> Tuple[List[List[float]], List[List[float]]]:
-        filtered_centroids: List[List[float]] = []
-        filtered_dims: List[List[float]] = []
-
-        for centroid, dim in zip(centroids, dims):
-            too_close = False
-            for existing in filtered_centroids:
-                if np.linalg.norm(np.asarray(centroid) - np.asarray(existing)) < min_distance:
-                    too_close = True
-                    break
-            if not too_close:
-                filtered_centroids.append(centroid)
-                filtered_dims.append(dim)
-
-        return filtered_centroids, filtered_dims
-
-    # ---------- Fusion ----------
-    def fuse_detections(self) -> List[Tuple[int, List[float]]]:
-        if not self.pc_centroids and not self.hough_centroids:
-            return []
-
-        fused_centroids: List[List[float]] = []
-
-        if not self.pc_centroids:
-            fused_centroids = self.hough_centroids
-        elif not self.hough_centroids:
-            fused_centroids = self.pc_centroids
+        if sorted_results:
+            cupholder_centroids, cupholder_dimensions = map(list, zip(*sorted_results))
         else:
-            # Use PCL detections as the base set. Refine each PCL cupholder with
-            # a nearby Hough detection when available; otherwise keep the PCL one.
-            used_hough = set()
-            for p in self.pc_centroids:
-                p_arr = np.asarray(p, dtype=float)
-                best_h_idx = None
-                best_dist = float("inf")
+            cupholder_centroids, cupholder_dimensions = [], []
 
-                for h_idx, h in enumerate(self.hough_centroids):
-                    if h_idx in used_hough:
-                        continue
-                    dist = float(np.linalg.norm(np.asarray(h, dtype=float) - p_arr))
-                    if dist < FUSION_MATCH_THRESHOLD and dist < best_dist:
-                        best_dist = dist
-                        best_h_idx = h_idx
-
-                if best_h_idx is not None:
-                    used_hough.add(best_h_idx)
-                    h = self.hough_centroids[best_h_idx]
-                    c = [
-                        h_i * FUSION_WEIGHT_HOUGH + p_i * FUSION_WEIGHT_PCL
-                        for h_i, p_i in zip(h, p)
-                    ]
-                else:
-                    c = [float(p[0]), float(p[1]), float(p[2])]
-
-                is_occupied = any(
-                    np.linalg.norm(np.asarray(c) - np.asarray(occ)) < 0.04
-                    for occ in self.occupied_pcl_centroids
-                )
-                if not is_occupied:
-                    fused_centroids.append([float(c[0]), float(c[1]), float(c[2])])
-
-            # Keep remaining Hough-only detections (when PCL under-detects), but
-            # avoid duplicating already fused centroids.
-            for h_idx, h in enumerate(self.hough_centroids):
-                if h_idx in used_hough:
-                    continue
-                h_arr = np.asarray(h, dtype=float)
-                is_duplicate = any(
-                    np.linalg.norm(h_arr - np.asarray(fused, dtype=float))
-                    < FUSION_MATCH_THRESHOLD
-                    for fused in fused_centroids
-                )
-                if is_duplicate:
-                    continue
-
-                is_occupied = any(
-                    np.linalg.norm(h_arr - np.asarray(occ, dtype=float)) < 0.04
-                    for occ in self.occupied_pcl_centroids
-                )
-                if not is_occupied:
-                    fused_centroids.append([float(h_arr[0]), float(h_arr[1]), float(h_arr[2])])
-
-        fused_centroids = sorted(
-            fused_centroids,
-            key=lambda c: (float(c[0]), float(c[1]), float(c[2])),
-        )
-
-        if fused_centroids:
-            return self.publish_cupholders(fused_centroids, method="fused")
-        return []
+        return cupholder_centroids, cupholder_dimensions
 
     # ---------- Publishing ----------
-    def publish_tray(self, centroids: List[List[float]], dims: List[List[float]]) -> None:
+    def publish_tray(
+        self, surface_centroids: List[List[float]], surface_dimensions: List[List[float]]
+    ) -> None:
         marker_array = MarkerArray()
 
-        for idx, (centroid, dim) in enumerate(zip(centroids, dims)):
-            radius = float(dim[0]) / 2.0
-            h = TRAY_MARKER_HEIGHT
+        for idx, (centroid, dimensions) in enumerate(
+            zip(surface_centroids, surface_dimensions)
+        ):
+            radius = float(dimensions[0]) / 2.0
+            height = 0.09
 
-            marker = Marker()
-            marker.header.frame_id = "base_link"
-            marker.id = idx
-            marker.type = Marker.CYLINDER
-            marker.action = Marker.ADD
-            marker.pose.position.x = float(centroid[0])
-            marker.pose.position.y = float(centroid[1])
-            marker.pose.position.z = float(centroid[2]) - h / 2.0
-            marker.pose.orientation.w = 1.0
-            marker.scale.x = radius * 2.0
-            marker.scale.y = radius * 2.0
-            marker.scale.z = h
-            marker.color.r = 0.0
-            marker.color.g = 1.0
-            marker.color.b = 0.0
-            marker.color.a = 0.4
-            marker_array.markers.append(marker)
+            cylinder_marker = Marker()
+            cylinder_marker.header.frame_id = "base_link"
+            cylinder_marker.id = idx
+            cylinder_marker.type = Marker.CYLINDER
+            cylinder_marker.action = Marker.ADD
+            cylinder_marker.pose.position.x = float(centroid[0])
+            cylinder_marker.pose.position.y = float(centroid[1]) + 0.018
+            cylinder_marker.pose.position.z = float(centroid[2]) - height / 2.0
+            cylinder_marker.pose.orientation.w = 1.0
+            cylinder_marker.scale.x = radius * 2.0
+            cylinder_marker.scale.y = radius * 2.0
+            cylinder_marker.scale.z = height
+            cylinder_marker.color.r = 0.0
+            cylinder_marker.color.g = 1.0
+            cylinder_marker.color.b = 0.0
+            cylinder_marker.color.a = 0.4
+            marker_array.markers.append(cylinder_marker)
 
-            msg = DetectedSurfaces()
-            msg.surface_id = idx
-            msg.position.x = float(centroid[0])
-            msg.position.y = float(centroid[1])
-            msg.position.z = float(centroid[2])
-            msg.height = float(dim[0])
-            msg.width = float(dim[1])
-            self.tray_detected_pub.publish(msg)
+            surface_msg = DetectedSurfaces()
+            surface_msg.surface_id = int(idx)
+            surface_msg.position.x = float(centroid[0])
+            surface_msg.position.y = float(centroid[1]) + 0.018
+            surface_msg.position.z = float(centroid[2])
+            surface_msg.height = float(dimensions[0])
+            surface_msg.width = float(dimensions[1])
+            self.tray_detected_pub.publish(surface_msg)
 
-        if marker_array.markers:
-            self.tray_marker_pub.publish(marker_array)
+        self.tray_marker_pub.publish(marker_array)
 
     def publish_cupholders(
         self,
         centroids: List[List[float]],
-        dims: Optional[List[List[float]]] = None,
+        dimensions: Optional[List[List[float]]] = None,
         method: str = "fused",
-    ) -> List[Tuple[int, List[float]]]:
-        if not centroids:
-            if method != "fused":
-                self.cupholder_marker_pub.publish(MarkerArray())
-                self.cupholder_marker_legacy_pub.publish(MarkerArray())
-            else:
-                self.cuph_confidence_pub.publish(Float32MultiArray())
-            return []
+    ) -> None:
+        matched_centroids = self.match_detections_to_previous(centroids)
 
-        # Important: only fused detections should drive persistent IDs used by
-        # downstream manipulation. Hough/PCL intermediate overlays are visual-only.
-        if method == "fused":
-            matched_raw = self.match_detections_to_previous(
-                centroids, threshold=self.id_match_threshold
+        x_values = [c[0] for _, c in matched_centroids]
+        if not x_values:
+            self.get_logger().warn(
+                f"No matched centroids found for method '{method}'. Skipping publish."
             )
-            matched = [
-                (track_id, self.smooth_fused_centroid(track_id, c))
-                for track_id, c in matched_raw
-            ]
-            matched = sorted(matched, key=lambda x: x[0])
-        else:
-            ordered = sorted(centroids, key=lambda c: (c[0], c[1]))
-            matched = [(idx, c) for idx, c in enumerate(ordered)]
-
-        x_values = [float(c[0]) for _, c in matched]
-        x_center = sum(x_values) / len(x_values) if x_values else 0.0
+            return
+        x_center = sum(x_values) / len(x_values)
         correction_factor = 0.1
 
         marker_array = MarkerArray()
         now = self.get_clock().now().to_msg()
-        now_sec = self.get_clock().now().nanoseconds / 1e9
-        confidence_msg = Float32MultiArray()
-        confidence_data: List[float] = []
+        text_height_offset = 0.1
 
-        method_offset = {"hough": 0, "pcl": 100, "fused": 200}.get(method, 0)
-
-        for assigned_id, centroid in matched:
-            centroid_x = float(centroid[0]) + 0.005
-            centroid_y = float(centroid[1]) - 0.002
-            centroid_z = float(centroid[2])
-
+        for assigned_id, centroid in matched_centroids:
             radius = 0.035
             height = 0.05
-            if dims is not None and len(dims) > 0:
-                nearest_idx = self.find_nearest_centroid_idx(centroid, centroids)
-                if nearest_idx is not None and nearest_idx < len(dims):
-                    d = dims[nearest_idx]
-                    radius = float(max(d[0], d[1])) / 2.0
-                    height = float(d[2])
+            if dimensions and assigned_id < len(dimensions):
+                radius = float(dimensions[assigned_id][0]) / 2.0
+                height = float(dimensions[assigned_id][1])
+
+            centroid[0] += 0.005
+            centroid[1] -= 0.002
 
             marker = Marker()
             marker.ns = method
             marker.header.frame_id = "base_link"
             marker.header.stamp = now
             marker.lifetime = Duration(sec=2)
-            marker.id = method_offset + assigned_id
+            marker.id = assigned_id
             marker.type = Marker.CYLINDER
             marker.action = Marker.ADD
-            marker.pose.position.x = centroid_x
-            marker.pose.position.y = centroid_y
-            marker.pose.position.z = centroid_z
+            marker.pose.position.x = float(centroid[0])
+            marker.pose.position.y = float(centroid[1])
+            marker.pose.position.z = float(centroid[2])
             marker.pose.orientation.w = 1.0
             marker.scale.x = radius * 2.0
             marker.scale.y = radius * 2.0
@@ -932,27 +672,21 @@ class ObjectDetection(Node):
                 marker.color.r, marker.color.g, marker.color.b = (1.0, 1.0, 0.0)
             elif method == "pcl":
                 marker.color.r, marker.color.g, marker.color.b = (0.0, 0.0, 1.0)
-            else:
+            elif method == "fused":
                 marker.color.r, marker.color.g, marker.color.b = (1.0, 0.0, 0.0)
 
-            marker_array.markers.append(marker)
-
-            if method == "fused":
-                is_stable, confidence = self.update_temporal_track(
-                    assigned_id, [centroid_x, centroid_y, centroid_z], now_sec
-                )
                 text_marker = Marker()
                 text_marker.header.frame_id = "base_link"
                 text_marker.header.stamp = now
-                text_marker.lifetime = Duration(sec=2)
                 text_marker.ns = "enum"
                 text_marker.type = Marker.TEXT_VIEW_FACING
                 text_marker.id = 1000 + assigned_id
-                text_marker.text = f"ch_{assigned_id + 1} ({confidence:.2f})"
+                text_marker.text = f"ch_{assigned_id + 1}"
+                text_marker.lifetime = Duration(sec=2)
                 text_marker.action = Marker.ADD
-                text_marker.pose.position.x = centroid_x
-                text_marker.pose.position.y = centroid_y
-                text_marker.pose.position.z = centroid_z + TEXT_HEIGHT_OFFSET
+                text_marker.pose.position.x = float(centroid[0])
+                text_marker.pose.position.y = float(centroid[1])
+                text_marker.pose.position.z = float(centroid[2]) + text_height_offset
                 text_marker.pose.orientation.w = 1.0
                 text_marker.scale.x = 0.05
                 text_marker.scale.y = 0.05
@@ -963,196 +697,23 @@ class ObjectDetection(Node):
                 text_marker.color.a = 1.0
                 marker_array.markers.append(text_marker)
 
-                confidence_data.extend(
-                    [
-                        float(assigned_id + 1),
-                        float(confidence),
-                        1.0 if is_stable else 0.0,
-                        float(centroid_x),
-                        float(centroid_y),
-                        float(centroid_z),
-                    ]
+                adjusted_x = centroid[0] - (centroid[0] - x_center) * correction_factor
+                det = DetectedObjects()
+                det.object_id = int(assigned_id + 1)
+                det.position = Point(
+                    x=float(adjusted_x),
+                    y=float(centroid[1]),
+                    z=float(centroid[2]),
                 )
+                det.width = float(radius * 2.0)
+                det.thickness = float(radius * 2.0)
+                det.height = float(height)
+                self.cuph_detected_pub.publish(det)
 
-                adjusted_x = centroid_x - (centroid_x - x_center) * correction_factor
-                should_publish = (
-                    is_stable
-                    if self.publish_stable_only
-                    else confidence >= self.min_publish_confidence
-                )
-                if should_publish:
-                    det = DetectedObjects()
-                    det.object_id = int(assigned_id + 1)
-                    det.position = Point(
-                        x=float(adjusted_x), y=float(centroid_y), z=float(centroid_z)
-                    )
-                    det.width = float(radius * 2.0)
-                    det.thickness = float(radius * 2.0)
-                    det.height = float(height)
-                    self.cuph_detected_pub.publish(det)
+            marker_array.markers.append(marker)
 
-        if method == "fused":
-            self.prune_stale_tracks(now_sec)
-            confidence_msg.data = confidence_data
-            self.cuph_confidence_pub.publish(confidence_msg)
         self.cupholder_marker_pub.publish(marker_array)
         self.cupholder_marker_legacy_pub.publish(marker_array)
-        return matched
-
-    def draw_fused_labels_on_image(
-        self,
-        image: np.ndarray,
-        labeled_fused: List[Tuple[int, List[float]]],
-        cam_frame: str,
-    ) -> None:
-        if self.K is None or not labeled_fused:
-            return
-
-        fx, fy = float(self.K[0, 0]), float(self.K[1, 1])
-        cx, cy = float(self.K[0, 2]), float(self.K[1, 2])
-        h_img, w_img = image.shape[:2]
-
-        for assigned_id, centroid in labeled_fused:
-            point_in_cam = self.transform_point(
-                centroid[0], centroid[1], centroid[2], "base_link", cam_frame
-            )
-            if point_in_cam is None:
-                continue
-
-            x_c, y_c, z_c = point_in_cam
-            if z_c <= 1e-6:
-                continue
-
-            u = int(round((fx * x_c / z_c) + cx))
-            v = int(round((fy * y_c / z_c) + cy))
-            if not (0 <= u < w_img and 0 <= v < h_img):
-                continue
-
-            # Compact camera label for better readability in the image panel.
-            label = f"ch{assigned_id + 1}"
-            cv2.circle(image, (u, v), 4, (255, 0, 0), -1)
-            cv2.putText(
-                image,
-                label,
-                (u + 8, v - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 0, 0),
-                2,
-                cv2.LINE_AA,
-            )
-
-    def transform_point(
-        self,
-        x: float,
-        y: float,
-        z: float,
-        source_frame: str,
-        target_frame: str,
-    ) -> Optional[Tuple[float, float, float]]:
-        ps = PointStamped()
-        ps.header.frame_id = source_frame
-        ps.header.stamp = self.get_clock().now().to_msg()
-        ps.point.x = float(x)
-        ps.point.y = float(y)
-        ps.point.z = float(z)
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                target_frame,
-                source_frame,
-                rclpy.time.Time(),
-            )
-            ps_out = tf2_geometry_msgs.do_transform_point(ps, tf)
-            return (
-                float(ps_out.point.x),
-                float(ps_out.point.y),
-                float(ps_out.point.z),
-            )
-        except Exception:
-            return None
-
-    def update_temporal_track(
-        self, track_id: int, centroid: List[float], now_sec: float
-    ) -> Tuple[bool, float]:
-        pos_hist = self.track_positions[track_id]
-        t_hist = self.track_times[track_id]
-
-        pos_hist.append(np.asarray(centroid, dtype=float))
-        t_hist.append(float(now_sec))
-        while t_hist and (now_sec - t_hist[0]) > TRACK_WINDOW_SEC:
-            t_hist.popleft()
-            pos_hist.popleft()
-
-        count = len(pos_hist)
-        if count == 0:
-            return False, 0.0
-
-        if count == 1:
-            std_xy = float("inf")
-            std_z = float("inf")
-        else:
-            arr = np.asarray(pos_hist, dtype=float)
-            std_xy = float(np.linalg.norm(np.std(arr[:, :2], axis=0)))
-            std_z = float(np.std(arr[:, 2]))
-
-        sample_score = min(1.0, count / float(TRACK_MIN_STABLE_SAMPLES))
-        xy_score = max(0.0, 1.0 - (std_xy / TRACK_MAX_STD_XY)) if np.isfinite(std_xy) else 0.0
-        z_score = max(0.0, 1.0 - (std_z / TRACK_MAX_STD_Z)) if np.isfinite(std_z) else 0.0
-        confidence = float(np.clip((0.5 * sample_score) + (0.35 * xy_score) + (0.15 * z_score), 0.0, 1.0))
-
-        is_stable = (
-            count >= TRACK_MIN_STABLE_SAMPLES
-            and std_xy <= TRACK_MAX_STD_XY
-            and std_z <= TRACK_MAX_STD_Z
-        )
-        return is_stable, confidence
-
-    def prune_stale_tracks(self, now_sec: float) -> None:
-        stale_ids = []
-        for track_id, t_hist in self.track_times.items():
-            if not t_hist:
-                stale_ids.append(track_id)
-                continue
-            if (now_sec - t_hist[-1]) > TRACK_TIMEOUT_SEC:
-                stale_ids.append(track_id)
-
-        for track_id in stale_ids:
-            self.track_times.pop(track_id, None)
-            self.track_positions.pop(track_id, None)
-            self.filtered_positions.pop(track_id, None)
-        if stale_ids:
-            stale_set = set(stale_ids)
-            self.prev_detections = [
-                (track_id, centroid)
-                for track_id, centroid in self.prev_detections
-                if track_id not in stale_set
-            ]
-
-    def smooth_fused_centroid(self, track_id: int, centroid: List[float]) -> List[float]:
-        current = np.asarray(centroid, dtype=float)
-        prev = self.filtered_positions.get(track_id)
-        if prev is None:
-            filtered = current
-        else:
-            delta = current - prev
-            dist = float(np.linalg.norm(delta))
-            if dist > self.max_frame_jump_m and dist > 1e-9:
-                current = prev + (delta / dist) * self.max_frame_jump_m
-            alpha = float(np.clip(self.fused_ema_alpha, 0.05, 1.0))
-            filtered = alpha * current + (1.0 - alpha) * prev
-
-        self.filtered_positions[track_id] = filtered
-        return [float(filtered[0]), float(filtered[1]), float(filtered[2])]
-
-    @staticmethod
-    def find_nearest_centroid_idx(
-        target: List[float], candidates: List[List[float]]
-    ) -> Optional[int]:
-        if not candidates:
-            return None
-        t = np.asarray(target, dtype=float)
-        dists = [float(np.linalg.norm(t - np.asarray(c, dtype=float))) for c in candidates]
-        return int(np.argmin(dists))
 
     def match_detections_to_previous(
         self,
@@ -1160,55 +721,31 @@ class ObjectDetection(Node):
         threshold: float = 0.05,
         max_ids: int = 4,
     ) -> List[Tuple[int, List[float]]]:
-        ordered_centroids = sorted(
-            new_centroids,
-            key=lambda c: (float(c[0]), float(c[1]), float(c[2])),
-        )
-
-        now_sec = self.get_clock().now().nanoseconds / 1e9
-        candidate_tracks: List[Tuple[int, List[float]]] = []
-        for track_id, pos in self.filtered_positions.items():
-            t_hist = self.track_times.get(track_id)
-            if not t_hist:
-                continue
-            if (now_sec - t_hist[-1]) > TRACK_TIMEOUT_SEC:
-                continue
-            candidate_tracks.append(
-                (int(track_id), [float(pos[0]), float(pos[1]), float(pos[2])])
-            )
-
-        if not candidate_tracks:
-            candidate_tracks = [
-                (int(track_id), [float(centroid[0]), float(centroid[1]), float(centroid[2])])
-                for track_id, centroid in self.prev_detections
-            ]
-
-        candidate_tracks = sorted(candidate_tracks, key=lambda x: x[0])
         matched: List[Tuple[int, List[float]]] = []
         unmatched: List[List[float]] = []
-        used_track_ids = set()
+        used_prev_ids = set()
         id_pool = set(range(max_ids))
         used_current_ids = set()
 
-        for centroid in ordered_centroids:
+        for centroid in new_centroids:
             min_dist = float("inf")
             matched_id = None
-            for prev_id, prev_pos in candidate_tracks:
-                if prev_id in used_track_ids:
+            for prev_id, prev_pos in self.prev_detections:
+                if prev_id in used_prev_ids:
                     continue
-                dist = float(np.linalg.norm(np.asarray(centroid) - np.asarray(prev_pos)))
+                dist = np.linalg.norm(np.array(centroid) - np.array(prev_pos))
                 if dist < threshold and dist < min_dist:
                     matched_id = prev_id
                     min_dist = dist
 
             if matched_id is not None:
                 matched.append((matched_id, centroid))
-                used_track_ids.add(matched_id)
+                used_prev_ids.add(matched_id)
                 used_current_ids.add(matched_id)
             else:
                 unmatched.append(centroid)
 
-        available_ids = sorted(id_pool - used_current_ids)
+        available_ids = list(id_pool - used_current_ids)
         for centroid in unmatched:
             if not available_ids:
                 break
@@ -1216,7 +753,6 @@ class ObjectDetection(Node):
             matched.append((assigned_id, centroid))
             used_current_ids.add(assigned_id)
 
-        matched = sorted(matched, key=lambda x: x[0])
         self.prev_detections = [(id_, centroid) for id_, centroid in matched]
         return matched
 

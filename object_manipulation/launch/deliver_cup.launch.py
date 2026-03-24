@@ -17,7 +17,7 @@ def generate_launch_description():
     bt_xml_path = os.path.join(
         get_package_share_directory("object_manipulation"),
         "bt_config",
-        "deliver_coffee_tree.xml",
+        "deliver_cup_tree.xml",
     )
 
     moveit_config = (
@@ -49,7 +49,15 @@ def generate_launch_description():
             )
         )
     )
-
+    static_virtual_joint_tfs_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory("my_moveit_config"),
+                "launch",
+                "static_virtual_joint_tfs.launch.py",
+            )
+        )
+    )
     move_group_node = Node(
         package="moveit_ros_move_group",
         executable="move_group",
@@ -71,8 +79,8 @@ def generate_launch_description():
 
     add_scene_node = Node(
         package="object_manipulation",
-        executable="add_coffee_scene",
-        name="add_coffee_scene",
+        executable="add_cafeteria_scene",
+        name="add_cafeteria_scene",
         output="screen",
         parameters=[{"use_sim_time": False}],
     )
@@ -110,6 +118,7 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            static_virtual_joint_tfs_launch,
             depth_to_points_launch,
             object_detection_node,
             move_group_node,

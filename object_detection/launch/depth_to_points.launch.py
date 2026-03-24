@@ -16,7 +16,6 @@ def generate_launch_description():
             "0.111",
             "0.215",
             "0.210",
-            # "base_link",
             "world",
             "D415_link",
         ],
@@ -34,15 +33,22 @@ def generate_launch_description():
                 package="depth_image_proc",
                 plugin="depth_image_proc::PointCloudXyzrgbNode",
                 name="point_cloud_converter_node",
-                parameters=[{"exact_sync": True}, {"queue_size": 15}],
+                parameters=[{"queue_size": 15}],
                 remappings=[
                     ("rgb/camera_info", "/D415/aligned_depth_to_color/camera_info"),
                     ("rgb/image_rect_color", "/D415/color/image_raw"),
                     ("depth_registered/image_rect", "/D415/aligned_depth_to_color/image_raw"),
-                    ("points", "/D415/barista_points"),
+                    ("points", "/D415/barista_points_be"),
                 ],
             ),
         ],
+        output="screen",
+    )
+
+    pcl_qos_bridge = Node(
+        package="object_detection",
+        executable="pcl_qos_conv",
+        name="pcl_qos_conv",
         output="screen",
     )
 
@@ -50,5 +56,6 @@ def generate_launch_description():
         [
             static_tf_world_to_d415,
             point_cloud_container,
+            pcl_qos_bridge,
         ]
     )
