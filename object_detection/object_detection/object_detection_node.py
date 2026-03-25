@@ -7,6 +7,7 @@ from typing import List, Optional
 import cv2
 import numpy as np
 import rclpy
+import sensor_msgs_py.point_cloud2 as pc2
 import tf2_geometry_msgs
 import tf2_ros
 from builtin_interfaces.msg import Duration
@@ -14,13 +15,27 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import Point, PointStamped
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
 
 from custom_msgs.msg import DetectedObjects
 from object_detection.geometry import estimate_depth_for_circle, project_pixel_to_3d
 from object_detection.perception_core import Candidate2D, CupholderPerception, PerceptionConfig
 from object_detection.tracker import Detection3D, StableTracker
+
+# Fixed tray-plane normalization settings (non-configurable on purpose).
+_PLANE_ROI_X = (-0.70, -0.20)
+_PLANE_ROI_Y = (-0.20, 0.50)
+_PLANE_ROI_Z = (-0.70, -0.20)
+_PLANE_MAX_POINTS = 5000
+_PLANE_RANSAC_ITERS = 80
+_PLANE_DIST_THRESH_M = 0.008
+_PLANE_MIN_INLIERS = 250
+_PLANE_MIN_INLIER_RATIO = 0.10
+_PLANE_MIN_NZ = 0.75
+_PLANE_MAX_AGE_SEC = 1.5
+_PLANE_MAX_Z_CORRECTION_M = 0.03
+_PLANE_Z_OFFSET_M = 0.0
 
 
 class ObjectDetectionNode(Node):
@@ -98,6 +113,9 @@ class ObjectDetectionNode(Node):
         self.bridge = CvBridge()
         self.k_matrix: Optional[np.ndarray] = None
         self.last_depth_m: Optional[np.ndarray] = None
+        self.tray_plane: Optional[tuple[np.ndarray, float]] = None
+        self.tray_plane_stamp_sec: float = 0.0
+        self.rng = np.random.default_rng(42)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -121,6 +139,12 @@ class ObjectDetectionNode(Node):
         self.create_subscription(Image, depth_topic, self._depth_cb, qos_profile_sensor_data)
         self.create_subscription(CameraInfo, camera_info_topic, self._camera_info_cb, qos_profile_sensor_data)
         self.create_subscription(Image, color_topic, self._image_cb, qos_profile_sensor_data)
+        self.create_subscription(
+            PointCloud2,
+            str(self.get_parameter("pointcloud_topic").value),
+            self._pointcloud_cb,
+            qos_profile_sensor_data,
+        )
 
         self.get_logger().info("Object detection v2 initialized")
 
@@ -138,6 +162,128 @@ class ObjectDetectionNode(Node):
         else:
             self.last_depth_m = depth.astype(np.float32)
 
+    def _fit_plane_ransac(self, points_xyz: np.ndarray) -> Optional[tuple[np.ndarray, float]]:
+        point_count = points_xyz.shape[0]
+        if point_count < 3:
+            return None
+
+        best_mask = None
+        best_count = 0
+        for _ in range(_PLANE_RANSAC_ITERS):
+            sample_idx = self.rng.choice(point_count, size=3, replace=False)
+            p1, p2, p3 = points_xyz[sample_idx]
+            normal = np.cross(p2 - p1, p3 - p1)
+            norm = float(np.linalg.norm(normal))
+            if norm < 1e-6:
+                continue
+            normal = normal / norm
+            if normal[2] < 0.0:
+                normal = -normal
+
+            d = -float(np.dot(normal, p1))
+            distances = np.abs(points_xyz @ normal + d)
+            mask = distances < _PLANE_DIST_THRESH_M
+            inliers = int(np.count_nonzero(mask))
+            if inliers > best_count:
+                best_count = inliers
+                best_mask = mask
+
+        if best_mask is None:
+            return None
+
+        inlier_points = points_xyz[best_mask]
+        inlier_ratio = float(inlier_points.shape[0]) / float(point_count)
+        if inlier_points.shape[0] < _PLANE_MIN_INLIERS or inlier_ratio < _PLANE_MIN_INLIER_RATIO:
+            return None
+
+        centroid = np.mean(inlier_points, axis=0)
+        _, _, vh = np.linalg.svd(inlier_points - centroid, full_matrices=False)
+        normal = vh[-1]
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm < 1e-6:
+            return None
+        normal = normal / normal_norm
+        if normal[2] < 0.0:
+            normal = -normal
+        if abs(float(normal[2])) < _PLANE_MIN_NZ:
+            return None
+
+        d = -float(np.dot(normal, centroid))
+        return normal.astype(float), d
+
+    def _pointcloud_cb(self, msg: PointCloud2) -> None:
+        raw_points = np.array(
+            list(pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True))
+        )
+        # Humble can return a structured dtype for read_points(); normalize to Nx3 float32.
+        if raw_points.dtype.names is not None:
+            points = np.column_stack(
+                [raw_points["x"], raw_points["y"], raw_points["z"]]
+            ).astype(np.float32, copy=False)
+        else:
+            points = np.asarray(raw_points, dtype=np.float32).reshape(-1, 3)
+        if points.size == 0:
+            return
+
+        mask = (
+            (points[:, 0] >= _PLANE_ROI_X[0])
+            & (points[:, 0] <= _PLANE_ROI_X[1])
+            & (points[:, 1] >= _PLANE_ROI_Y[0])
+            & (points[:, 1] <= _PLANE_ROI_Y[1])
+            & (points[:, 2] >= _PLANE_ROI_Z[0])
+            & (points[:, 2] <= _PLANE_ROI_Z[1])
+        )
+        roi_points = points[mask]
+        if roi_points.shape[0] < _PLANE_MIN_INLIERS:
+            return
+
+        if roi_points.shape[0] > _PLANE_MAX_POINTS:
+            idx = self.rng.choice(roi_points.shape[0], size=_PLANE_MAX_POINTS, replace=False)
+            roi_points = roi_points[idx]
+
+        plane = self._fit_plane_ransac(roi_points)
+        if plane is None:
+            return
+
+        self.tray_plane = plane
+        self.tray_plane_stamp_sec = self.get_clock().now().nanoseconds * 1e-9
+
+    def _normalized_positions(self, tracks: List) -> List[np.ndarray]:
+        normalized: List[np.ndarray] = []
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        use_plane = (
+            self.tray_plane is not None
+            and (now_sec - self.tray_plane_stamp_sec) <= _PLANE_MAX_AGE_SEC
+        )
+
+        for tr in tracks:
+            pos = np.array(tr.position, dtype=float)
+            if not use_plane:
+                normalized.append(pos)
+                continue
+
+            normal, d = self.tray_plane
+            if abs(float(normal[2])) < 1e-6:
+                normalized.append(pos)
+                continue
+
+            z_plane = -(
+                float(normal[0]) * float(pos[0])
+                + float(normal[1]) * float(pos[1])
+                + float(d)
+            ) / float(normal[2])
+            z_plane += _PLANE_Z_OFFSET_M
+            z_new = float(
+                np.clip(
+                    z_plane,
+                    float(pos[2]) - _PLANE_MAX_Z_CORRECTION_M,
+                    float(pos[2]) + _PLANE_MAX_Z_CORRECTION_M,
+                )
+            )
+            normalized.append(np.array([float(pos[0]), float(pos[1]), z_new], dtype=float))
+
+        return normalized
+
     def _to_base_link(self, xyz_cam: tuple[float, float, float], source_frame: str) -> Optional[np.ndarray]:
         ps = PointStamped()
         ps.header.frame_id = source_frame
@@ -152,11 +298,11 @@ class ObjectDetectionNode(Node):
             self.get_logger().warn(f"TF transform failed: {exc}")
             return None
 
-    def _publish_markers(self, tracks: List) -> None:
+    def _publish_markers(self, tracks: List, positions: List[np.ndarray]) -> None:
         marker_array = MarkerArray()
         now = self.get_clock().now().to_msg()
 
-        for tr in tracks:
+        for tr, pos in zip(tracks, positions):
             marker = Marker()
             marker.header.frame_id = self.target_frame
             marker.header.stamp = now
@@ -165,9 +311,9 @@ class ObjectDetectionNode(Node):
             marker.type = Marker.CYLINDER
             marker.action = Marker.ADD
             marker.lifetime = Duration(sec=2)
-            marker.pose.position.x = float(tr.position[0])
-            marker.pose.position.y = float(tr.position[1])
-            marker.pose.position.z = float(tr.position[2])
+            marker.pose.position.x = float(pos[0])
+            marker.pose.position.y = float(pos[1])
+            marker.pose.position.z = float(pos[2])
             marker.pose.orientation.w = 1.0
             marker.scale.x = float(2.0 * tr.radius_m)
             marker.scale.y = float(2.0 * tr.radius_m)
@@ -186,9 +332,9 @@ class ObjectDetectionNode(Node):
             text.type = Marker.TEXT_VIEW_FACING
             text.action = Marker.ADD
             text.lifetime = Duration(sec=2)
-            text.pose.position.x = float(tr.position[0])
-            text.pose.position.y = float(tr.position[1])
-            text.pose.position.z = float(tr.position[2]) + self.text_height_offset
+            text.pose.position.x = float(pos[0])
+            text.pose.position.y = float(pos[1])
+            text.pose.position.z = float(pos[2]) + self.text_height_offset
             text.pose.orientation.w = 1.0
             text.scale.z = 0.05
             text.color.r = 0.0
@@ -201,14 +347,14 @@ class ObjectDetectionNode(Node):
         self.marker_pub.publish(marker_array)
         self.marker_legacy_pub.publish(marker_array)
 
-    def _publish_detections(self, tracks: List) -> None:
-        for tr in tracks:
+    def _publish_detections(self, tracks: List, positions: List[np.ndarray]) -> None:
+        for tr, pos in zip(tracks, positions):
             msg = DetectedObjects()
             msg.object_id = int(tr.track_id) + 1
             msg.position = Point(
-                x=float(tr.position[0]),
-                y=float(tr.position[1]),
-                z=float(tr.position[2]),
+                x=float(pos[0]),
+                y=float(pos[1]),
+                z=float(pos[2]),
             )
             msg.width = float(2.0 * tr.radius_m)
             msg.thickness = float(2.0 * tr.radius_m)
@@ -222,7 +368,7 @@ class ObjectDetectionNode(Node):
             id_by_candidate[idx] = tr
 
         for i, cand in enumerate(candidates):
-            cv2.circle(out, (cand.u, cand.v), int(round(cand.radius_px)), (0, 255, 0), 2)
+            cv2.circle(out, (cand.u, cand.v), int(round(cand.radius_px)), (0, 0, 255), 2)
             cv2.circle(out, (cand.u, cand.v), 2, (0, 0, 255), -1)
 
             label = "?"
@@ -289,8 +435,9 @@ class ObjectDetectionNode(Node):
         confirmed_tracks = self.tracker.confirmed_tracks()
 
         if confirmed_tracks:
-            self._publish_markers(confirmed_tracks)
-            self._publish_detections(confirmed_tracks)
+            normalized_positions = self._normalized_positions(confirmed_tracks)
+            self._publish_markers(confirmed_tracks, normalized_positions)
+            self._publish_detections(confirmed_tracks, normalized_positions)
 
         annotated = self._annotate(bgr, kept_candidates, track_outputs)
         out_msg = self.bridge.cv2_to_imgmsg(annotated, encoding="bgr8")
