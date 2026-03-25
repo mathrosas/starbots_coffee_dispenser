@@ -261,12 +261,12 @@ class ObjectDetection(Node):
 
             filtered_cloud = self.filter_cloud(
                 cloud,
-                min_x=-0.7,
-                max_x=-0.2,
-                min_y=-0.2,
-                max_y=0.5,
-                min_z=-0.6,
-                max_z=-0.3,
+                min_x=-0.85,
+                max_x=-0.10,
+                min_y=-0.30,
+                max_y=0.60,
+                min_z=-0.80,
+                max_z=-0.20,
             )
             if filtered_cloud is None or filtered_cloud.size == 0:
                 return
