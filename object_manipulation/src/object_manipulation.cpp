@@ -224,6 +224,7 @@ public:
     bt_goal_prepared_ = false;
     bt_place_failed_ = false;
     bt_rotated_to_place_ = false;
+    bt_cup_released_ = false;
     clear_orientation_constraints();
 
     halt_bt_tree();
@@ -314,6 +315,7 @@ private:
   bool bt_goal_prepared_{false};
   bool bt_place_failed_{false};
   bool bt_rotated_to_place_{false};
+  bool bt_cup_released_{false};
   moveit_msgs::msg::Constraints path_constraints_;
 
   double cup_x_{FIXED_CUP_X};
@@ -498,6 +500,7 @@ private:
   BT::NodeStatus bt_validate_detection() {
     bt_place_failed_ = false;
     bt_rotated_to_place_ = false;
+    bt_cup_released_ = false;
     clear_orientation_constraints();
 
     // Per-goal startup reset: always go home and open gripper first.
@@ -612,21 +615,31 @@ private:
       return BT::NodeStatus::FAILURE;
     }
     if (bt_post_place_retreat() != BT::NodeStatus::SUCCESS) {
+      // Cup is already released in the target cupholder.
+      // If retreat fails, keep the place result as success and return home.
+      RCLCPP_WARN(LOGGER,
+                  "Post-place retreat failed after cup release; continuing to "
+                  "final return-home.");
       clear_orientation_constraints();
-      return BT::NodeStatus::FAILURE;
+      return BT::NodeStatus::SUCCESS;
     }
     clear_orientation_constraints();
     return BT::NodeStatus::SUCCESS;
   }
 
   BT::NodeStatus bt_put_back() {
+    if (bt_cup_released_) {
+      RCLCPP_WARN(LOGGER,
+                  "Skipping recovery_putback: cup already released in holder.");
+      return BT::NodeStatus::FAILURE;
+    }
     bt_place_failed_ = true;
     apply_orientation_constraints();
     const auto status = bt_put_cup_back_fixed();
     if (status != BT::NodeStatus::SUCCESS) {
       move_group_robot_->stop();
       clear_orientation_constraints();
-      return bt_fail("Put-back failed or timed out");
+      return bt_fail("Put-back failed");
     }
     clear_orientation_constraints();
     return BT::NodeStatus::SUCCESS;
@@ -847,6 +860,7 @@ private:
     }
     log_xy_error_to_holder("after_insert_cartesian", place_x_, place_y_,
                            place_z_);
+    clear_orientation_constraints();
     publish_feedback(active_goal_handle_, "cup_inserted", 0.84f,
                      active_holder_id_);
     return BT::NodeStatus::SUCCESS;
@@ -861,6 +875,7 @@ private:
     if (!execute_trajectory_gripper()) {
       return bt_fail("Failed to release cup");
     }
+    bt_cup_released_ = true;
     publish_feedback(active_goal_handle_, "cup_released", 0.90f,
                      active_holder_id_);
     return BT::NodeStatus::SUCCESS;
@@ -869,14 +884,12 @@ private:
   BT::NodeStatus bt_post_place_retreat() {
     publish_feedback(active_goal_handle_, "post_place_retreat", 0.94f,
                      active_holder_id_);
-    RCLCPP_INFO(LOGGER,
-                "Going to Pre-place Position Again (%.3f, %.3f, %.3f)...",
-                place_x_, place_y_, place_z_ + APPROACH_Z_DELTA);
-    setup_goal_pose_target(place_x_, place_y_, place_z_ + APPROACH_Z_DELTA,
-                           -1.000, +0.000, +0.000, +0.000);
-    plan_trajectory_kinematics();
-    if (!execute_trajectory_kinematics()) {
-      return bt_fail("Failed post-place retreat");
+    RCLCPP_INFO(LOGGER, "Post-place retreat: Cartesian +Z %.1f mm...",
+                APPROACH_Z_DELTA * 1000.0);
+    setup_waypoints_target(+0.000, +0.000, +APPROACH_Z_DELTA);
+    plan_trajectory_cartesian();
+    if (!execute_trajectory_cartesian()) {
+      return bt_fail("Failed post-place Cartesian retreat");
     }
     publish_feedback(active_goal_handle_, "post_place_retreat_done", 0.95f,
                      active_holder_id_);
@@ -935,7 +948,7 @@ private:
 
     RCLCPP_WARN(LOGGER,
                 "BT rotate recovery: returning cup to fixed cup position.");
-    publish_feedback(active_goal_handle_, "rotate_recovery_putback", 0.66f,
+    publish_feedback(active_goal_handle_, "recovery_putback", 0.66f,
                      active_holder_id_);
 
     auto move_above_fixed_cup = [this]() {

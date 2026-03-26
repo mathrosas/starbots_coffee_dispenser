@@ -79,6 +79,7 @@ class ObjectDetectionNode(Node):
         self.declare_parameter("default_hole_height", 0.05)
         self.declare_parameter("min_hole_radius_m", 0.015)
         self.declare_parameter("max_hole_radius_m", 0.050)
+        self.declare_parameter("min_cupholder_separation_m", 0.008)
 
         color_topic = str(self.get_parameter("color_topic").value)
         depth_topic = str(self.get_parameter("depth_topic").value)
@@ -93,6 +94,9 @@ class ObjectDetectionNode(Node):
         self.default_hole_height = float(self.get_parameter("default_hole_height").value)
         self.min_hole_radius_m = float(self.get_parameter("min_hole_radius_m").value)
         self.max_hole_radius_m = float(self.get_parameter("max_hole_radius_m").value)
+        self.min_cupholder_separation_m = float(
+            self.get_parameter("min_cupholder_separation_m").value
+        )
 
         p_cfg = PerceptionConfig(
             roi_width_ratio=float(self.get_parameter("roi_width_ratio").value),
@@ -282,6 +286,11 @@ class ObjectDetectionNode(Node):
             )
             normalized.append(np.array([float(pos[0]), float(pos[1]), z_new], dtype=float))
 
+        if normalized:
+            z_median = float(np.median([p[2] for p in normalized]))
+            for p in normalized:
+                p[2] = z_median
+
         return normalized
 
     def _to_base_link(self, xyz_cam: tuple[float, float, float], source_frame: str) -> Optional[np.ndarray]:
@@ -297,6 +306,44 @@ class ObjectDetectionNode(Node):
         except Exception as exc:
             self.get_logger().warn(f"TF transform failed: {exc}")
             return None
+
+    def _apply_min_separation(
+        self,
+        detections: List[Detection3D],
+        candidates: List[Candidate2D],
+    ) -> tuple[List[Detection3D], List[Candidate2D]]:
+        if len(detections) <= 1:
+            return detections, candidates
+
+        order = sorted(
+            range(len(detections)),
+            key=lambda i: detections[i].score,
+            reverse=True,
+        )
+        kept_by_score: List[int] = []
+
+        for idx in order:
+            pos_i = detections[idx].position
+            reject = False
+            for j in kept_by_score:
+                pos_j = detections[j].position
+                dist_xy = float(np.linalg.norm(pos_i[:2] - pos_j[:2]))
+                min_sep = max(
+                    self.min_cupholder_separation_m,
+                    0.80 * (detections[idx].radius_m + detections[j].radius_m),
+                )
+                if dist_xy < min_sep:
+                    reject = True
+                    break
+            if not reject:
+                kept_by_score.append(idx)
+
+        kept_set = set(kept_by_score)
+        kept_in_input_order = [i for i in range(len(detections)) if i in kept_set]
+
+        filtered_detections = [detections[i] for i in kept_in_input_order]
+        filtered_candidates = [candidates[i] for i in kept_in_input_order]
+        return filtered_detections, filtered_candidates
 
     def _publish_markers(self, tracks: List, positions: List[np.ndarray]) -> None:
         marker_array = MarkerArray()
@@ -430,6 +477,10 @@ class ObjectDetectionNode(Node):
             score = float(np.clip(0.65 * cand.score + 0.35 * depth_conf, 0.0, 1.0))
             detections_3d.append(Detection3D(position=xyz_base, radius_m=radius_m, score=score))
             kept_candidates.append(cand)
+
+        detections_3d, kept_candidates = self._apply_min_separation(
+            detections_3d, kept_candidates
+        )
 
         track_outputs = self.tracker.update(detections_3d)
         confirmed_tracks = self.tracker.confirmed_tracks()
