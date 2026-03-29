@@ -79,7 +79,7 @@ class ObjectDetectionNode(Node):
         self.declare_parameter("default_hole_height", 0.05)
         self.declare_parameter("min_hole_radius_m", 0.015)
         self.declare_parameter("max_hole_radius_m", 0.050)
-        self.declare_parameter("min_cupholder_separation_m", 0.008)
+        self.declare_parameter("min_cupholder_separation_m", 0.08)
 
         color_topic = str(self.get_parameter("color_topic").value)
         depth_topic = str(self.get_parameter("depth_topic").value)
