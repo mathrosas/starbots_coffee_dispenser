@@ -846,6 +846,9 @@ private:
   }
 
   BT::NodeStatus bt_insert_cup() {
+    clear_orientation_constraints();
+    RCLCPP_INFO(LOGGER, "Cleared orientation constraints before insertion.");
+
     publish_feedback(active_goal_handle_, "insert_cup", 0.82f,
                      active_holder_id_);
     const double insert_delta = 2 * APPROACH_Z_DELTA;
