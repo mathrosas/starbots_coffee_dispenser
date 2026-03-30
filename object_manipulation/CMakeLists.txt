@@ -23,18 +23,6 @@ find_package(moveit_msgs REQUIRED)
 find_package(moveit_visual_tools REQUIRED)
 find_package(std_msgs REQUIRED)
 
-<<<<<<< HEAD
-add_executable(add_coffee_scene src/add_coffee_scene.cpp)
-add_executable(
-  object_manipulation
-  src/object_manipulation.cpp
-  src/motion_policy.cpp
-  src/watch_guards.cpp
-  src/motion_executor.cpp
-)
-
-target_include_directories(object_manipulation PRIVATE include)
-=======
 add_executable(add_cafeteria_scene src/add_cafeteria_scene.cpp)
 add_executable(deliver_cup_bridge src/deliver_cup_bridge.cpp)
 add_executable(object_manipulation
@@ -49,7 +37,6 @@ add_executable(object_manipulation
   src/bt_nodes/putback_node.cpp
   src/bt_nodes/return_node.cpp
 )
->>>>>>> PRESENTATION
 
 target_include_directories(object_manipulation PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
