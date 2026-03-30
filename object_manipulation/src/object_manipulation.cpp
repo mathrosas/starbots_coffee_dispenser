@@ -60,6 +60,9 @@ static constexpr double PREGRASP_Z_OFFSET = 0.25; // 25 cm above detected object
 static constexpr double APPROACH_Z_DELTA = 0.10;  // straight down
 static constexpr double PLACE_RETRY_Z_STEP = 0.005; // pre-place retry step
 static constexpr int DETECTION_MAX_ATTEMPTS = 5;
+static constexpr int PRE_PLACE_PRIMARY_ATTEMPTS = 5;
+static constexpr int PRE_PLACE_RECOVERY_ATTEMPTS = 5;
+static constexpr int PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS = 5;
 static constexpr std::chrono::seconds DETECTION_RETRY_WINDOW =
     std::chrono::seconds(10);
 
@@ -581,7 +584,7 @@ private:
     }
 
     apply_orientation_constraints();
-    if (!run_pre_place_with_timeout(0.0, 2)) {
+    if (!run_pre_place_with_timeout(0.0, PRE_PLACE_PRIMARY_ATTEMPTS)) {
       try {
         clear_orientation_constraints();
         if (!move_to_quick_pick_like_pose()) {
@@ -594,7 +597,7 @@ private:
         }
 
         apply_orientation_constraints();
-        if (!run_pre_place_with_timeout(0.0, 1)) {
+        if (!run_pre_place_with_timeout(0.0, PRE_PLACE_RECOVERY_ATTEMPTS)) {
           throw std::runtime_error("pre_place");
         }
       } catch (const std::exception &) {
@@ -965,22 +968,38 @@ private:
       return execute_trajectory_kinematics();
     };
 
-    if (!move_above_fixed_cup()) {
+    bool moved_above_fixed_cup = false;
+    for (int attempt = 1; attempt <= PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS;
+         ++attempt) {
+      if (move_above_fixed_cup()) {
+        moved_above_fixed_cup = true;
+        break;
+      }
+
+      if (attempt == PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS) {
+        break;
+      }
+
       RCLCPP_WARN(LOGGER,
-                  "BT rotate recovery: initial move above fixed cup failed. "
-                  "Trying intermediate fallback.");
+                  "BT rotate recovery: move above fixed cup failed "
+                  "(attempt %d/%d). Trying intermediate fallback.",
+                  attempt, PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS);
       setup_goal_pose_target(-0.200, +0.150, +0.400, -1.000, +0.000, +0.000,
                              +0.000);
       plan_trajectory_kinematics();
       if (!execute_trajectory_kinematics()) {
-        return bt_fail(
-            "BT rotate recovery: failed moving to intermediate fallback pose");
+        RCLCPP_WARN(LOGGER,
+                    "BT rotate recovery: intermediate fallback move failed "
+                    "(attempt %d/%d). Retrying...",
+                    attempt, PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS);
+        continue;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(300));
-      if (!move_above_fixed_cup()) {
-        return bt_fail("BT rotate recovery: failed moving above fixed cup pose "
-                       "after fallback");
-      }
+    }
+
+    if (!moved_above_fixed_cup) {
+      return bt_fail("BT rotate recovery: failed moving above fixed cup pose "
+                     "after retries");
     }
 
     setup_waypoints_target(+0.000, +0.000, -APPROACH_Z_DELTA);
