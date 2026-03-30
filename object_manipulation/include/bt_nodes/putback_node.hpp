@@ -5,8 +5,7 @@
 
 class PutBackNode : public BT::SyncActionNode {
 public:
-  PutBackNode(const std::string &name,
-              const BT::NodeConfig &config,
+  PutBackNode(const std::string &name, const BT::NodeConfig &config,
               object_manipulation::BtApi *api);
 
   static BT::PortsList providedPorts();

@@ -7,4 +7,6 @@ GoalNotCanceledNode::GoalNotCanceledNode(const std::string &name,
 
 BT::PortsList GoalNotCanceledNode::providedPorts() { return {}; }
 
-BT::NodeStatus GoalNotCanceledNode::tick() { return api_->bt_goal_not_canceled(); }
+BT::NodeStatus GoalNotCanceledNode::tick() {
+  return api_->bt_goal_not_canceled();
+}

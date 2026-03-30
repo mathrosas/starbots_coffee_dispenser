@@ -5,8 +5,7 @@
 
 class PlaceNode : public BT::SyncActionNode {
 public:
-  PlaceNode(const std::string &name,
-            const BT::NodeConfig &config,
+  PlaceNode(const std::string &name, const BT::NodeConfig &config,
             object_manipulation::BtApi *api);
 
   static BT::PortsList providedPorts();

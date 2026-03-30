@@ -49,9 +49,6 @@ def generate_launch_description():
             )
         )
     )
-<<<<<<< HEAD:object_manipulation/launch/deliver_coffee.launch.py
-
-=======
     static_virtual_joint_tfs_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -61,7 +58,6 @@ def generate_launch_description():
             )
         )
     )
->>>>>>> PRESENTATION:object_manipulation/launch/deliver_cup.launch.py
     move_group_node = Node(
         package="moveit_ros_move_group",
         executable="move_group",
@@ -129,10 +125,7 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-<<<<<<< HEAD:object_manipulation/launch/deliver_coffee.launch.py
-=======
             static_virtual_joint_tfs_launch,
->>>>>>> PRESENTATION:object_manipulation/launch/deliver_cup.launch.py
             depth_to_points_launch,
             object_detection_node,
             move_group_node,

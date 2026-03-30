@@ -5,8 +5,7 @@
 
 class ReturnNode : public BT::SyncActionNode {
 public:
-  ReturnNode(const std::string &name,
-             const BT::NodeConfig &config,
+  ReturnNode(const std::string &name, const BT::NodeConfig &config,
              object_manipulation::BtApi *api);
 
   static BT::PortsList providedPorts();

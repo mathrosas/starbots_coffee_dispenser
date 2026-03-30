@@ -7,4 +7,6 @@ ValidateDetectionNode::ValidateDetectionNode(const std::string &name,
 
 BT::PortsList ValidateDetectionNode::providedPorts() { return {}; }
 
-BT::NodeStatus ValidateDetectionNode::tick() { return api_->bt_validate_detection(); }
+BT::NodeStatus ValidateDetectionNode::tick() {
+  return api_->bt_validate_detection();
+}

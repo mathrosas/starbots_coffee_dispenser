@@ -5,8 +5,7 @@
 
 class PickNode : public BT::SyncActionNode {
 public:
-  PickNode(const std::string &name,
-           const BT::NodeConfig &config,
+  PickNode(const std::string &name, const BT::NodeConfig &config,
            object_manipulation::BtApi *api);
 
   static BT::PortsList providedPorts();

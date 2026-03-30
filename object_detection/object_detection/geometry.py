@@ -4,7 +4,6 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-
 def estimate_depth_for_circle(
     depth_m: np.ndarray,
     u: int,

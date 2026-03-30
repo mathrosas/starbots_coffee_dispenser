@@ -5,8 +5,7 @@
 
 class ValidateDetectionNode : public BT::SyncActionNode {
 public:
-  ValidateDetectionNode(const std::string &name,
-                        const BT::NodeConfig &config,
+  ValidateDetectionNode(const std::string &name, const BT::NodeConfig &config,
                         object_manipulation::BtApi *api);
 
   static BT::PortsList providedPorts();

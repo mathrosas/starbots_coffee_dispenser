@@ -5,8 +5,7 @@
 
 class PrePlaceNode : public BT::SyncActionNode {
 public:
-  PrePlaceNode(const std::string &name,
-               const BT::NodeConfig &config,
+  PrePlaceNode(const std::string &name, const BT::NodeConfig &config,
                object_manipulation::BtApi *api);
 
   static BT::PortsList providedPorts();

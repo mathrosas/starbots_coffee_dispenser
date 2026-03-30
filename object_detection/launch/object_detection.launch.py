@@ -29,11 +29,7 @@ def generate_launch_description():
         executable="object_detection",
         name="object_detection",
         output="screen",
-<<<<<<< HEAD
-        parameters=[{"pointcloud_topic": "/D415/barista_points"}, {"use_sim_time": False}],
-=======
         parameters=[{"use_sim_time": False}],
->>>>>>> PRESENTATION
         arguments=["--ros-args", "--log-level", "info"],
     )
 

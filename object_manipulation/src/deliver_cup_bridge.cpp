@@ -28,9 +28,8 @@ public:
 
     action_client_ = rclcpp_action::create_client<DeliverCup>(
         this, "/deliver_cup", action_callback_group_);
-    status_pub_ =
-        this->create_publisher<std_msgs::msg::String>("/robot_status_feedback",
-                                                      10);
+    status_pub_ = this->create_publisher<std_msgs::msg::String>(
+        "/robot_status_feedback", 10);
     service_server_ = this->create_service<PickPlaceCup>(
         "/deliver_cup",
         std::bind(&PickPlaceCupBridge::handle_service, this,
@@ -141,8 +140,8 @@ private:
             return;
           }
           std::ostringstream msg;
-          msg << "stage=" << feedback->stage << " progress=" << feedback->progress
-              << " cupholder_id="
+          msg << "stage=" << feedback->stage
+              << " progress=" << feedback->progress << " cupholder_id="
               << static_cast<unsigned int>(feedback->cupholder_id);
           publish_status(msg.str());
         };
@@ -216,7 +215,7 @@ int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<PickPlaceCupBridge>();
   rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(),
-                                                     2);
+                                                    2);
   executor.add_node(node);
   executor.spin();
   rclcpp::shutdown();
