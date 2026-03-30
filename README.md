@@ -16,7 +16,11 @@ This repo is focused on the **simulation pipeline** (UR3e + Barista world), with
 - `my_moveit_config` -> robot planning and controller config
 - `object_detection` -> perception node (`Python`)
 - `object_manipulation` -> planning/execution node (`C++`, BT-based)
+<<<<<<< HEAD
 - `custom_msgs` -> project messages and actions (`DeliverCoffee.action`)
+=======
+- `custom_msgs` -> project messages/interfaces (`DeliverCup.action`, `PickPlaceCup.srv`)
+>>>>>>> PRESENTATION
 - `media` -> screenshots for documentation
 
 ## Quick Run (after workspace is already built)
@@ -32,14 +36,22 @@ Terminal 2:
 
 ```bash
 source ~/ros2_ws/install/setup.bash
+<<<<<<< HEAD
 ros2 launch object_manipulation deliver_coffee.launch.py
+=======
+ros2 launch object_manipulation deliver_cup.launch.py
+>>>>>>> PRESENTATION
 ```
 
 Terminal 3 (send a request):
 
 ```bash
 source ~/ros2_ws/install/setup.bash
+<<<<<<< HEAD
 ros2 action send_goal /deliver_coffee custom_msgs/action/DeliverCoffee "{cupholder_id: 1}" --feedback
+=======
+ros2 action send_goal /deliver_cup custom_msgs/action/DeliverCup "{cupholder_id: 1}" --feedback
+>>>>>>> PRESENTATION
 ```
 
 ## One-time Setup (host machine)
@@ -129,7 +141,11 @@ If startup fails once, stop and relaunch the simulation. In this project that is
 ros2 topic list | grep -E "depth|camera|point"
 ```
 
+<<<<<<< HEAD
 This is useful before sending `/deliver_coffee` goals.
+=======
+This is useful before sending `/deliver_cup` goals.
+>>>>>>> PRESENTATION
 
 ## Real robot note (Zenoh)
 
@@ -147,10 +163,17 @@ ros2 topic list
 
 ## Troubleshooting notes
 
+<<<<<<< HEAD
 - `deliver_coffee` does nothing:
   - confirm controllers are `active`
   - confirm `/joint_states` is publishing
   - relaunch `object_manipulation deliver_coffee.launch.py`
+=======
+- `deliver_cup` does nothing:
+  - confirm controllers are `active`
+  - confirm `/joint_states` is publishing
+  - relaunch `object_manipulation deliver_cup.launch.py`
+>>>>>>> PRESENTATION
 - simulation starts but behaves unstable:
   - wait until Gazebo fully spawns both robots before sending action goals
 - first Gazebo launch fails:

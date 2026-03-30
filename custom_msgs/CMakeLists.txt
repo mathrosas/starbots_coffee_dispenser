@@ -31,7 +31,8 @@ endif()
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedSurfaces.msg"
   "msg/DetectedObjects.msg"
-  "action/DeliverCoffee.action"
+  "action/DeliverCup.action"
+  "srv/PickPlaceCup.srv"
   DEPENDENCIES geometry_msgs std_msgs action_msgs
 )
 

@@ -9,11 +9,19 @@ def generate_launch_description():
         executable="static_transform_publisher",
         name="static_transform_world_to_d415",
         arguments=[
+<<<<<<< HEAD
             "-0.408",
             "-0.290",
             "0.395",
             "-0.107",
             "0.107",
+=======
+            "-0.375",
+            "-0.460",
+            "0.395",
+            "-0.112",
+            "0.111",
+>>>>>>> PRESENTATION
             "0.215",
             "0.210",
             "world",
@@ -33,6 +41,10 @@ def generate_launch_description():
                 package="depth_image_proc",
                 plugin="depth_image_proc::PointCloudXyzrgbNode",
                 name="point_cloud_converter_node",
+<<<<<<< HEAD
+=======
+                parameters=[{"queue_size": 15}],
+>>>>>>> PRESENTATION
                 remappings=[
                     ("rgb/camera_info", "/D415/aligned_depth_to_color/camera_info"),
                     ("rgb/image_rect_color", "/D415/color/image_raw"),
@@ -44,7 +56,11 @@ def generate_launch_description():
         output="screen",
     )
 
+<<<<<<< HEAD
     pcl_qos_conv_node = Node(
+=======
+    pcl_qos_bridge = Node(
+>>>>>>> PRESENTATION
         package="object_detection",
         executable="pcl_qos_conv",
         name="pcl_qos_conv",
@@ -55,6 +71,10 @@ def generate_launch_description():
         [
             static_tf_world_to_d415,
             point_cloud_container,
+<<<<<<< HEAD
             pcl_qos_conv_node,
+=======
+            pcl_qos_bridge,
+>>>>>>> PRESENTATION
         ]
     )

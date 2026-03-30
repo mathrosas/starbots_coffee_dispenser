@@ -16,7 +16,7 @@ def generate_launch_description():
     bt_xml_path = os.path.join(
         get_package_share_directory("object_manipulation"),
         "bt_config",
-        "deliver_coffee_tree.xml",
+        "deliver_cup_tree.xml",
     )
 
     moveit_config = (
@@ -52,8 +52,8 @@ def generate_launch_description():
 
     add_scene_node = Node(
         package="object_manipulation",
-        executable="add_coffee_scene",
-        name="add_coffee_scene",
+        executable="add_cafeteria_scene",
+        name="add_cafeteria_scene",
         output="screen",
         parameters=[{"use_sim_time": False}],
     )
@@ -68,7 +68,6 @@ def generate_launch_description():
     )
 
     manipulation_node = Node(
-        name="object_manipulation",
         package="object_manipulation",
         executable="object_manipulation",
         output="screen",
@@ -86,6 +85,20 @@ def generate_launch_description():
         actions=[manipulation_node],
     )
 
+    deliver_cup_bridge_node = Node(
+        package="object_manipulation",
+        executable="deliver_cup_bridge",
+        name="deliver_cup_bridge",
+        output="screen",
+        parameters=[{"use_sim_time": False}],
+    )
+
     return LaunchDescription(
-        [move_group_node, add_scene_node, rviz_node, delayed_manipulation_node]
+        [
+            move_group_node,
+            add_scene_node,
+            rviz_node,
+            deliver_cup_bridge_node,
+            delayed_manipulation_node,
+        ]
     )

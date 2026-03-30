@@ -392,7 +392,7 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: Intensity
+      Color Transformer: RGB8
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -411,8 +411,8 @@ Visualization Manager:
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /wrist_rgbd_depth_sensor/points
+        Reliability Policy: Best Effort
+        Value: /D415/barista_points
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -428,7 +428,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /cup_holder_marker
+        Value: /cup_holder_markers
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true

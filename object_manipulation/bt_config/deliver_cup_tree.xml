@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<root BTCPP_format="4" main_tree_to_execute="DeliverCoffeeRoot">
-  <BehaviorTree ID="DeliverCoffeeRoot">
-    <ReactiveSequence name="DeliverCoffee">
+<root BTCPP_format="4" main_tree_to_execute="DeliverCupRoot">
+  <BehaviorTree ID="DeliverCupRoot">
+    <ReactiveSequence name="DeliverCup">
       <GoalNotCanceled/>
       <Sequence name="MainSequence">
         <Sequence name="CoffeeDelivery">
@@ -11,17 +11,20 @@
           <Fallback name="PlaceOrRecover">
             <Sequence name="TrytoPlace">
               <PrePlace name="Pre-place"/>
+<<<<<<< HEAD:object_manipulation/bt_config/deliver_coffee_tree.xml
               <Sequence name="PlaceCore">
                 <InsertCup/>
                 <ReleaseCup/>
                 <PostPlaceRetreat/>
               </Sequence>
+=======
+              <Place/>
+>>>>>>> PRESENTATION:object_manipulation/bt_config/deliver_cup_tree.xml
             </Sequence>
-            <Sequence name="RecoverAndFail">
+            <Inverter>
               <PutBack name="Put Back"/>
-              <Return/>
-              <ForceFail/>
-            </Sequence>
+            </Inverter>
+            <Return/>
           </Fallback>
         </Sequence>
         <Return/>
@@ -36,11 +39,7 @@
     <Action ID="Pick"/>
     <Action ID="PrePlace"/>
     <Action ID="Place"/>
-    <Action ID="InsertCup"/>
-    <Action ID="ReleaseCup"/>
-    <Action ID="PostPlaceRetreat"/>
     <Action ID="PutBack"/>
     <Action ID="Return"/>
-    <Action ID="ForceFail"/>
   </TreeNodesModel>
 </root>
