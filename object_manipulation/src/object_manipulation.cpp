@@ -255,7 +255,11 @@ public:
     return false;
   }
 
-  BT::NodeStatus tick_bt_once() { return bt_tree_.tickOnce(); }
+  BT::NodeStatus tick_bt_once() {
+    const auto status = bt_tree_.tickOnce();
+    publish_bt_node_status("DeliverCupTree", status);
+    return status;
+  }
 
   void halt_bt_tree() {
     if (bt_tree_ready_) {

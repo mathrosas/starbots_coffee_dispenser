@@ -16,7 +16,7 @@ This repo is focused on the **simulation pipeline** (UR3e + Barista world), with
 - `my_moveit_config` -> robot planning and controller config
 - `object_detection` -> perception node (`Python`)
 - `object_manipulation` -> planning/execution node (`C++`, BT-based)
-- `custom_msgs` -> project messages and actions (`DeliverCoffee.action`)
+- `custom_msgs` -> project messages/interfaces (`DeliverCup.action`, `PickPlaceCup.srv`)
 - `media` -> screenshots for documentation
 
 ## Quick Run (after workspace is already built)
@@ -32,14 +32,14 @@ Terminal 2:
 
 ```bash
 source ~/ros2_ws/install/setup.bash
-ros2 launch object_manipulation deliver_coffee.launch.py
+ros2 launch object_manipulation deliver_cup.launch.py
 ```
 
 Terminal 3 (send a request):
 
 ```bash
 source ~/ros2_ws/install/setup.bash
-ros2 action send_goal /deliver_cup custom_msgs/action/DeliverCoffee "{cupholder_id: 1}" --feedback
+ros2 action send_goal /deliver_cup custom_msgs/action/DeliverCup "{cupholder_id: 1}" --feedback
 ```
 
 ## One-time Setup (host machine)
@@ -150,7 +150,7 @@ ros2 topic list
 - `deliver_cup` does nothing:
   - confirm controllers are `active`
   - confirm `/joint_states` is publishing
-  - relaunch `object_manipulation deliver_coffee.launch.py`
+  - relaunch `object_manipulation deliver_cup.launch.py`
 - simulation starts but behaves unstable:
   - wait until Gazebo fully spawns both robots before sending action goals
 - first Gazebo launch fails:

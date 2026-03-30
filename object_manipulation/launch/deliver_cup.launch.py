@@ -98,7 +98,6 @@ def generate_launch_description():
     )
 
     object_manipulation_node = Node(
-        name="object_manipulation",
         package="object_manipulation",
         executable="object_manipulation",
         output="screen",
@@ -116,6 +115,14 @@ def generate_launch_description():
         actions=[object_manipulation_node],
     )
 
+    deliver_cup_bridge_node = Node(
+        package="object_manipulation",
+        executable="deliver_cup_bridge",
+        name="deliver_cup_bridge",
+        output="screen",
+        parameters=[{"use_sim_time": False}],
+    )
+
     return LaunchDescription(
         [
             static_virtual_joint_tfs_launch,
@@ -124,6 +131,7 @@ def generate_launch_description():
             move_group_node,
             add_scene_node,
             rviz_node,
+            deliver_cup_bridge_node,
             delayed_object_manipulation_node,
         ]
     )

@@ -24,6 +24,7 @@ find_package(moveit_visual_tools REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_executable(add_cafeteria_scene src/add_cafeteria_scene.cpp)
+add_executable(deliver_cup_bridge src/deliver_cup_bridge.cpp)
 add_executable(object_manipulation
   src/bt_main.cpp
   src/object_manipulation.cpp
@@ -46,6 +47,12 @@ ament_target_dependencies(add_cafeteria_scene
 	rclcpp
 	moveit_ros_planning_interface)
 
+ament_target_dependencies(deliver_cup_bridge
+    rclcpp
+    rclcpp_action
+    custom_msgs
+    std_msgs)
+
 ament_target_dependencies(object_manipulation
     ament_cmake
     ament_index_cpp
@@ -61,7 +68,7 @@ ament_target_dependencies(object_manipulation
     moveit_msgs
     std_msgs)
 
-install(TARGETS object_manipulation add_cafeteria_scene
+install(TARGETS object_manipulation add_cafeteria_scene deliver_cup_bridge
   DESTINATION lib/${PROJECT_NAME}
 )
 
