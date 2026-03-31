@@ -16,11 +16,14 @@ def generate_launch_description():
     bt_xml_path = os.path.join(
         get_package_share_directory("object_manipulation"),
         "bt_config",
-        "deliver_coffee_tree.xml",
+        "deliver_cup_tree.xml",
     )
 
     moveit_config = (
         MoveItConfigsBuilder("name", package_name="my_moveit_config")
+        .robot_description(file_path="config/name.urdf.xacro")
+        .robot_description_semantic(file_path="config/name.srdf")
+        .sensors_3d(file_path="config/sensors_3d.yaml")
         .planning_pipelines(
             default_planning_pipeline="ompl",
             pipelines=["ompl", "pilz_industrial_motion_planner"],
@@ -49,8 +52,8 @@ def generate_launch_description():
 
     add_scene_node = Node(
         package="object_manipulation",
-        executable="add_coffee_scene",
-        name="add_coffee_scene",
+        executable="add_cafeteria_scene",
+        name="add_cafeteria_scene",
         output="screen",
         parameters=[{"use_sim_time": True}],
     )
@@ -61,11 +64,10 @@ def generate_launch_description():
         name="rviz2",
         output="screen",
         arguments=["-d", rviz_config],
-        parameters=[{"use_sim_time": True}],
+        parameters=[moveit_config.to_dict(), {"use_sim_time": True}],
     )
 
     manipulation_node = Node(
-        name="object_manipulation",
         package="object_manipulation",
         executable="object_manipulation",
         output="screen",
@@ -83,6 +85,20 @@ def generate_launch_description():
         actions=[manipulation_node],
     )
 
+    deliver_cup_bridge_node = Node(
+        package="object_manipulation",
+        executable="deliver_cup_bridge",
+        name="deliver_cup_bridge",
+        output="screen",
+        parameters=[{"use_sim_time": True}],
+    )
+
     return LaunchDescription(
-        [move_group_node, add_scene_node, rviz_node, delayed_manipulation_node]
+        [
+            move_group_node,
+            add_scene_node,
+            rviz_node,
+            deliver_cup_bridge_node,
+            delayed_manipulation_node,
+        ]
     )

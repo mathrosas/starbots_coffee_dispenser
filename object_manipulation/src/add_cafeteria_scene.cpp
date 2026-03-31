@@ -9,9 +9,9 @@
 #include <string>
 #include <thread>
 
-class AddStarbotsScene : public rclcpp::Node {
+class AddCafeteriaScene : public rclcpp::Node {
 public:
-  AddStarbotsScene() : Node("add_starbots_scene") {
+  AddCafeteriaScene() : Node("add_cafeteria_scene") {
     // Initialize PlanningSceneInterface
     planning_scene_interface_ =
         std::make_shared<moveit::planning_interface::PlanningSceneInterface>();
@@ -107,7 +107,7 @@ private:
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<AddStarbotsScene>();
+  auto node = std::make_shared<AddCafeteriaScene>();
 
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(node);

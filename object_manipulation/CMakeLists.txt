@@ -23,21 +23,35 @@ find_package(moveit_msgs REQUIRED)
 find_package(moveit_visual_tools REQUIRED)
 find_package(std_msgs REQUIRED)
 
-add_executable(add_coffee_scene src/add_coffee_scene.cpp)
-add_executable(
-  object_manipulation
+add_executable(add_cafeteria_scene src/add_cafeteria_scene.cpp)
+add_executable(deliver_cup_bridge src/deliver_cup_bridge.cpp)
+add_executable(object_manipulation
+  src/bt_main.cpp
   src/object_manipulation.cpp
-  src/motion_policy.cpp
-  src/watch_guards.cpp
-  src/motion_executor.cpp
+  src/bt_nodes/goal_not_canceled_node.cpp
+  src/bt_nodes/validate_detection_node.cpp
+  src/bt_nodes/prepick_node.cpp
+  src/bt_nodes/pick_node.cpp
+  src/bt_nodes/preplace_node.cpp
+  src/bt_nodes/place_node.cpp
+  src/bt_nodes/putback_node.cpp
+  src/bt_nodes/return_node.cpp
 )
 
-target_include_directories(object_manipulation PRIVATE include)
+target_include_directories(object_manipulation PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 
-ament_target_dependencies(add_coffee_scene
+ament_target_dependencies(add_cafeteria_scene
 	ament_cmake
 	rclcpp
 	moveit_ros_planning_interface)
+
+ament_target_dependencies(deliver_cup_bridge
+    rclcpp
+    rclcpp_action
+    custom_msgs
+    std_msgs)
 
 ament_target_dependencies(object_manipulation
     ament_cmake
@@ -54,7 +68,7 @@ ament_target_dependencies(object_manipulation
     moveit_msgs
     std_msgs)
 
-install(TARGETS object_manipulation add_coffee_scene
+install(TARGETS object_manipulation add_cafeteria_scene deliver_cup_bridge
   DESTINATION lib/${PROJECT_NAME}
 )
 

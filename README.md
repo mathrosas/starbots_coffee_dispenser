@@ -1,4 +1,4 @@
-# Starbots Coffee Dispenser - `sim_mathrosas`
+# Starbots Coffee Cup Dispenser
 
 Simulation branch for my Robotics Developer Masterclass final project.
 
@@ -7,7 +7,7 @@ This repo is focused on the **simulation pipeline** (UR3e + Barista world), with
 - MoveIt2 planning config (`OMPL` + `PILZ`)
 - perception node for hole/object detection
 - BehaviorTree-based manipulation logic
-- action interface to trigger coffee delivery
+- action interface to trigger cup delivery
 
 ![Simulation setup](./media/simulation_setup.png)
 
@@ -16,7 +16,7 @@ This repo is focused on the **simulation pipeline** (UR3e + Barista world), with
 - `my_moveit_config` -> robot planning and controller config
 - `object_detection` -> perception node (`Python`)
 - `object_manipulation` -> planning/execution node (`C++`, BT-based)
-- `custom_msgs` -> project messages and actions (`DeliverCoffee.action`)
+- `custom_msgs` -> project messages and actions (`DeliverCup.action`)
 - `media` -> screenshots for documentation
 
 ## Quick Run (after workspace is already built)
@@ -32,15 +32,54 @@ Terminal 2:
 
 ```bash
 source ~/ros2_ws/install/setup.bash
-ros2 launch object_manipulation deliver_coffee.launch.py
+ros2 launch object_manipulation deliver_cup.launch.py
 ```
 
 Terminal 3 (send a request):
 
 ```bash
 source ~/ros2_ws/install/setup.bash
-ros2 action send_goal /deliver_coffee custom_msgs/action/DeliverCoffee "{cupholder_id: 1}" --feedback
+ros2 action send_goal /deliver_cup custom_msgs/action/DeliverCup "{cupholder_id: 1}" --feedback
 ```
+
+## Docker reproducibility (Ubuntu server)
+
+This repository includes a dockerized runtime at `docker/`, adapted to this project.
+The Docker image recipe is `docker/starbots-ros2-manipulation`.
+
+From the project root:
+
+```bash
+cd ~/ros2_ws/src/starbots_coffee_dispenser/docker
+chmod +x ros_entrypoint.sh
+docker compose build
+docker compose up
+```
+
+What this container launches:
+
+- `ros2 launch object_manipulation deliver_cup.launch.py`
+- `ros2 launch rosbridge_server rosbridge_websocket_launch.xml port:=9090`
+
+Foxglove connection:
+
+- same machine: `ws://localhost:9090`
+- remote server: `ws://<SERVER_IP>:9090`
+- The Construct public tunnel case: use the URL returned by `rosbridge_address`
+
+Important note:
+
+- This container expects the cafeteria simulation to already be running in the same ROS domain.
+- Start simulation on host (outside container) before sending goals:
+
+```bash
+source ~/ros2_ws/install/setup.bash
+ros2 launch the_construct_office_gazebo starbots_ur3e.launch.xml
+```
+
+Layout import (in Foxglove):
+
+- `/home/user/ros2_ws/src/starbots_coffee_dispenser/foxglove_webapp/foxglove_webapp.json`
 
 ## One-time Setup (host machine)
 
@@ -129,7 +168,7 @@ If startup fails once, stop and relaunch the simulation. In this project that is
 ros2 topic list | grep -E "depth|camera|point"
 ```
 
-This is useful before sending `/deliver_coffee` goals.
+This is useful before sending `/deliver_cup` goals.
 
 ## Real robot note (Zenoh)
 
@@ -147,10 +186,10 @@ ros2 topic list
 
 ## Troubleshooting notes
 
-- `deliver_coffee` does nothing:
+- `deliver_cup` does nothing:
   - confirm controllers are `active`
   - confirm `/joint_states` is publishing
-  - relaunch `object_manipulation deliver_coffee.launch.py`
+  - relaunch `object_manipulation deliver_cup.launch.py`
 - simulation starts but behaves unstable:
   - wait until Gazebo fully spawns both robots before sending action goals
 - first Gazebo launch fails:

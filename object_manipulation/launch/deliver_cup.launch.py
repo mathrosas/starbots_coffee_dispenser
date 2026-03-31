@@ -2,7 +2,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import TimerAction
+from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
 
@@ -16,11 +17,14 @@ def generate_launch_description():
     bt_xml_path = os.path.join(
         get_package_share_directory("object_manipulation"),
         "bt_config",
-        "deliver_coffee_tree.xml",
+        "deliver_cup_tree.xml",
     )
 
     moveit_config = (
         MoveItConfigsBuilder("name", package_name="my_moveit_config")
+        .robot_description(file_path="config/name.urdf.xacro")
+        .robot_description_semantic(file_path="config/name.srdf")
+        .sensors_3d(file_path="config/sensors_3d.yaml")
         .planning_pipelines(
             default_planning_pipeline="ompl",
             pipelines=["ompl", "pilz_industrial_motion_planner"],
@@ -33,9 +37,33 @@ def generate_launch_description():
         executable="object_detection",
         name="object_detection",
         output="screen",
+        parameters=[
+            {"use_sim_time": True},
+            {"color_topic": "/wrist_rgbd_depth_sensor/image_raw"},
+            {"depth_topic": "/wrist_rgbd_depth_sensor/depth/image_raw"},
+            {"camera_info_topic": "/wrist_rgbd_depth_sensor/camera_info"},
+            {"pointcloud_topic": "/wrist_rgbd_depth_sensor/points"},
+        ],
         arguments=["--ros-args", "--log-level", "info"],
     )
-
+    depth_to_points_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory("object_detection"),
+                "launch",
+                "depth_to_points.launch.py",
+            )
+        )
+    )
+    static_virtual_joint_tfs_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory("my_moveit_config"),
+                "launch",
+                "static_virtual_joint_tfs.launch.py",
+            )
+        )
+    )
     move_group_node = Node(
         package="moveit_ros_move_group",
         executable="move_group",
@@ -57,8 +85,8 @@ def generate_launch_description():
 
     add_scene_node = Node(
         package="object_manipulation",
-        executable="add_coffee_scene",
-        name="add_coffee_scene",
+        executable="add_cafeteria_scene",
+        name="add_cafeteria_scene",
         output="screen",
         parameters=[{"use_sim_time": True}],
     )
@@ -69,11 +97,13 @@ def generate_launch_description():
         name="rviz2",
         output="screen",
         arguments=["-d", rviz_config],
-        parameters=[{"use_sim_time": True}],
+        parameters=[
+            moveit_config.to_dict(),
+            {"use_sim_time": True},
+        ],
     )
 
     object_manipulation_node = Node(
-        name="object_manipulation",
         package="object_manipulation",
         executable="object_manipulation",
         output="screen",
@@ -91,12 +121,23 @@ def generate_launch_description():
         actions=[object_manipulation_node],
     )
 
+    deliver_cup_bridge_node = Node(
+        package="object_manipulation",
+        executable="deliver_cup_bridge",
+        name="deliver_cup_bridge",
+        output="screen",
+        parameters=[{"use_sim_time": True}],
+    )
+
     return LaunchDescription(
         [
+            static_virtual_joint_tfs_launch,
+            depth_to_points_launch,
             object_detection_node,
             move_group_node,
             add_scene_node,
             rviz_node,
+            deliver_cup_bridge_node,
             delayed_object_manipulation_node,
         ]
     )

@@ -23,10 +23,11 @@ def generate_launch_description():
 
     # Include the scene-adding node
     add_scene_node = Node(
-        package='object_manipulation', 
-        executable='add_coffee_scene',
-        name='add_coffee_scene',
-        output='screen',
+        package="object_manipulation",
+        executable="add_cafeteria_scene",
+        name="add_cafeteria_scene",
+        output="screen",
+        parameters=[{"use_sim_time": True}],
     )
 
     return LaunchDescription(
