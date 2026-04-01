@@ -37,6 +37,13 @@ _PLANE_MAX_AGE_SEC = 1.5
 _PLANE_MAX_Z_CORRECTION_M = 0.03
 _PLANE_Z_OFFSET_M = 0.0
 
+# Occupancy check: detections with enough 3D points above the cupholder area
+# are treated as occupied and filtered out.
+_OCCUPANCY_XY_MARGIN_M = 0.01
+_OCCUPANCY_Z_ABOVE_M = 0.04
+_OCCUPANCY_MIN_POINTS_ABOVE = 20
+_OCCUPANCY_MAX_CLOUD_AGE_SEC = 0.75
+
 
 class ObjectDetectionNode(Node):
     def __init__(self) -> None:
@@ -117,6 +124,10 @@ class ObjectDetectionNode(Node):
         self.bridge = CvBridge()
         self.k_matrix: Optional[np.ndarray] = None
         self.last_depth_m: Optional[np.ndarray] = None
+        self.last_roi_points: Optional[np.ndarray] = None
+        self.last_roi_frame: str = ""
+        self.last_roi_stamp_sec: float = 0.0
+        self.warned_occupancy_frame_mismatch = False
         self.tray_plane: Optional[tuple[np.ndarray, float]] = None
         self.tray_plane_stamp_sec: float = 0.0
         self.rng = np.random.default_rng(42)
@@ -238,6 +249,11 @@ class ObjectDetectionNode(Node):
             & (points[:, 2] <= _PLANE_ROI_Z[1])
         )
         roi_points = points[mask]
+        self.last_roi_points = roi_points
+        self.last_roi_frame = msg.header.frame_id
+        self.last_roi_stamp_sec = (
+            float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        )
         if roi_points.shape[0] < _PLANE_MIN_INLIERS:
             return
 
@@ -251,6 +267,39 @@ class ObjectDetectionNode(Node):
 
         self.tray_plane = plane
         self.tray_plane_stamp_sec = self.get_clock().now().nanoseconds * 1e-9
+
+    def _is_occupied_from_pointcloud(
+        self, pos_base: np.ndarray, radius_m: float, image_stamp_sec: float
+    ) -> bool:
+        if self.last_roi_points is None or self.last_roi_points.size == 0:
+            return False
+
+        # This occupancy check assumes ROI cloud is in the same frame as detections (target_frame).
+        if self.last_roi_frame and self.last_roi_frame != self.target_frame:
+            if not self.warned_occupancy_frame_mismatch:
+                self.get_logger().warn(
+                    "Occupancy check skipped: pointcloud frame '%s' != target_frame '%s'."
+                    % (self.last_roi_frame, self.target_frame)
+                )
+                self.warned_occupancy_frame_mismatch = True
+            return False
+
+        cloud_age_sec = abs(image_stamp_sec - self.last_roi_stamp_sec)
+        if cloud_age_sec > _OCCUPANCY_MAX_CLOUD_AGE_SEC:
+            return False
+
+        points = self.last_roi_points
+        xy_radius = float(max(radius_m + _OCCUPANCY_XY_MARGIN_M, 1e-3))
+
+        dx = points[:, 0] - float(pos_base[0])
+        dy = points[:, 1] - float(pos_base[1])
+        xy_mask = (dx * dx + dy * dy) <= (xy_radius * xy_radius)
+        if not np.any(xy_mask):
+            return False
+
+        z_threshold = float(pos_base[2]) + _OCCUPANCY_Z_ABOVE_M
+        points_above = int(np.count_nonzero(xy_mask & (points[:, 2] > z_threshold)))
+        return points_above >= _OCCUPANCY_MIN_POINTS_ABOVE
 
     def _normalized_positions(self, tracks: List) -> List[np.ndarray]:
         normalized: List[np.ndarray] = []
@@ -365,9 +414,9 @@ class ObjectDetectionNode(Node):
             marker.scale.x = float(2.0 * tr.radius_m)
             marker.scale.y = float(2.0 * tr.radius_m)
             marker.scale.z = self.default_hole_height
-            marker.color.r = 1.0
+            marker.color.r = 0.0
             marker.color.g = 0.0
-            marker.color.b = 0.0
+            marker.color.b = 1.0
             marker.color.a = 0.6
             marker_array.markers.append(marker)
 
@@ -415,8 +464,8 @@ class ObjectDetectionNode(Node):
             id_by_candidate[idx] = tr
 
         for i, cand in enumerate(candidates):
-            cv2.circle(out, (cand.u, cand.v), int(round(cand.radius_px)), (0, 0, 255), 2)
-            cv2.circle(out, (cand.u, cand.v), 2, (0, 0, 255), -1)
+            cv2.circle(out, (cand.u, cand.v), int(round(cand.radius_px)), (255, 0, 0), 2)
+            cv2.circle(out, (cand.u, cand.v), 2, (255, 0, 0), -1)
 
             label = "?"
             color = (180, 180, 180)
@@ -441,6 +490,9 @@ class ObjectDetectionNode(Node):
         if self.k_matrix is None or self.last_depth_m is None:
             return
 
+        image_stamp_sec = (
+            float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        )
         bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         candidates, _ = self.perception.detect(bgr)
 
@@ -473,6 +525,9 @@ class ObjectDetectionNode(Node):
                 radius_m = 0.035
             else:
                 radius_m = float(np.clip(z * cand.radius_px / fx, self.min_hole_radius_m, self.max_hole_radius_m))
+
+            if self._is_occupied_from_pointcloud(xyz_base, radius_m, image_stamp_sec):
+                continue
 
             score = float(np.clip(0.65 * cand.score + 0.35 * depth_conf, 0.0, 1.0))
             detections_3d.append(Detection3D(position=xyz_base, radius_m=radius_m, score=score))

@@ -66,7 +66,7 @@ static constexpr int PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS = 5;
 static constexpr std::chrono::seconds DETECTION_RETRY_WINDOW =
     std::chrono::seconds(10);
 
-// project defaults for fixed-cup mode [0.260, 0.370, -0.007]
+// project defaults for fixed-cup mode
 static constexpr double FIXED_CUP_X = 0.230; // 0.300
 static constexpr double FIXED_CUP_Y = 0.300; // 0.330
 static constexpr double FIXED_CUP_Z = 0.135;
@@ -546,7 +546,7 @@ private:
       return BT::NodeStatus::SUCCESS;
     });
 
-    if (future_result.wait_for(std::chrono::seconds(60)) !=
+    if (future_result.wait_for(std::chrono::seconds(90)) !=
             std::future_status::ready ||
         future_result.get() != BT::NodeStatus::SUCCESS) {
       move_group_robot_->stop();
@@ -563,7 +563,7 @@ private:
             return bt_move_pre_place(retry_lift, max_attempts) ==
                    BT::NodeStatus::SUCCESS;
           });
-      return future_result.wait_for(std::chrono::seconds(50)) ==
+      return future_result.wait_for(std::chrono::seconds(90)) ==
                  std::future_status::ready &&
              future_result.get();
     };
@@ -654,12 +654,6 @@ private:
 
   BT::NodeStatus bt_return() {
     clear_orientation_constraints();
-
-    setup_named_pose_gripper("close");
-    plan_trajectory_gripper();
-    if (!execute_trajectory_gripper()) {
-      return bt_fail("Failed to close gripper before return");
-    }
 
     // End every attempt at the home pose.
     if (bt_return_home() != BT::NodeStatus::SUCCESS) {
