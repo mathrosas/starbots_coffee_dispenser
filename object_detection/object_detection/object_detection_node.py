@@ -37,8 +37,20 @@ _PLANE_MAX_AGE_SEC = 1.5
 _PLANE_MAX_Z_CORRECTION_M = 0.03
 _PLANE_Z_OFFSET_M = 0.0
 
-# Occupancy check: detections with enough 3D points above the cupholder area
-# are treated as occupied and filtered out.
+# Occupancy check:
+# 1) Color occupancy on cupholder center (red center = empty, white center = occupied).
+# 2) Pointcloud occupancy as an additional guard when ROI cloud is available.
+_COLOR_INNER_RADIUS_RATIO = 0.55
+_COLOR_MIN_PIXELS = 50
+_COLOR_RED_HUE_MAX_1 = 12
+_COLOR_RED_HUE_MIN_2 = 165
+_COLOR_RED_SAT_MIN = 90
+_COLOR_RED_VAL_MIN = 60
+_COLOR_WHITE_SAT_MAX = 45
+_COLOR_WHITE_VAL_MIN = 150
+_COLOR_OCCUPIED_WHITE_RATIO_MIN = 0.55
+_COLOR_OCCUPIED_RED_RATIO_MAX = 0.20
+
 _OCCUPANCY_XY_MARGIN_M = 0.01
 _OCCUPANCY_Z_ABOVE_M = 0.04
 _OCCUPANCY_MIN_POINTS_ABOVE = 20
@@ -301,6 +313,47 @@ class ObjectDetectionNode(Node):
         points_above = int(np.count_nonzero(xy_mask & (points[:, 2] > z_threshold)))
         return points_above >= _OCCUPANCY_MIN_POINTS_ABOVE
 
+    def _is_occupied_from_color(self, hsv: np.ndarray, cand: Candidate2D) -> bool:
+        # Evaluate only the inner disk so the red ring/circumference does not dominate.
+        inner_r = max(3, int(round(float(cand.radius_px) * _COLOR_INNER_RADIUS_RATIO)))
+        h, w = hsv.shape[:2]
+        u = int(cand.u)
+        v = int(cand.v)
+
+        x0 = max(0, u - inner_r)
+        x1 = min(w - 1, u + inner_r)
+        y0 = max(0, v - inner_r)
+        y1 = min(h - 1, v + inner_r)
+        if x0 >= x1 or y0 >= y1:
+            return False
+
+        hsv_roi = hsv[y0 : y1 + 1, x0 : x1 + 1]
+        yy, xx = np.ogrid[y0 : y1 + 1, x0 : x1 + 1]
+        mask = ((xx - u) * (xx - u) + (yy - v) * (yy - v)) <= (inner_r * inner_r)
+        pixel_count = int(np.count_nonzero(mask))
+        if pixel_count < _COLOR_MIN_PIXELS:
+            return False
+
+        h_vals = hsv_roi[:, :, 0][mask]
+        s_vals = hsv_roi[:, :, 1][mask]
+        v_vals = hsv_roi[:, :, 2][mask]
+
+        red_mask = (
+            ((h_vals <= _COLOR_RED_HUE_MAX_1) | (h_vals >= _COLOR_RED_HUE_MIN_2))
+            & (s_vals >= _COLOR_RED_SAT_MIN)
+            & (v_vals >= _COLOR_RED_VAL_MIN)
+        )
+        white_mask = (s_vals <= _COLOR_WHITE_SAT_MAX) & (v_vals >= _COLOR_WHITE_VAL_MIN)
+
+        red_ratio = float(np.count_nonzero(red_mask)) / float(pixel_count)
+        white_ratio = float(np.count_nonzero(white_mask)) / float(pixel_count)
+
+        # Occupied cupholder center looks mostly white (cup) and not red.
+        return (
+            white_ratio >= _COLOR_OCCUPIED_WHITE_RATIO_MIN
+            and red_ratio <= _COLOR_OCCUPIED_RED_RATIO_MAX
+        )
+
     def _normalized_positions(self, tracks: List) -> List[np.ndarray]:
         normalized: List[np.ndarray] = []
         now_sec = self.get_clock().now().nanoseconds * 1e-9
@@ -414,9 +467,9 @@ class ObjectDetectionNode(Node):
             marker.scale.x = float(2.0 * tr.radius_m)
             marker.scale.y = float(2.0 * tr.radius_m)
             marker.scale.z = self.default_hole_height
-            marker.color.r = 1.0
+            marker.color.r = 0.0
             marker.color.g = 0.0
-            marker.color.b = 0.0
+            marker.color.b = 1.0
             marker.color.a = 0.6
             marker_array.markers.append(marker)
 
@@ -464,8 +517,8 @@ class ObjectDetectionNode(Node):
             id_by_candidate[idx] = tr
 
         for i, cand in enumerate(candidates):
-            cv2.circle(out, (cand.u, cand.v), int(round(cand.radius_px)), (0, 0, 255), 2)
-            cv2.circle(out, (cand.u, cand.v), 2, (0, 0, 255), -1)
+            cv2.circle(out, (cand.u, cand.v), int(round(cand.radius_px)), (255, 0, 0), 2)
+            cv2.circle(out, (cand.u, cand.v), 2, (255, 0, 0), -1)
 
             label = "?"
             color = (180, 180, 180)
@@ -494,6 +547,7 @@ class ObjectDetectionNode(Node):
             float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         )
         bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         candidates, _ = self.perception.detect(bgr)
 
         detections_3d: List[Detection3D] = []
@@ -525,6 +579,9 @@ class ObjectDetectionNode(Node):
                 radius_m = 0.035
             else:
                 radius_m = float(np.clip(z * cand.radius_px / fx, self.min_hole_radius_m, self.max_hole_radius_m))
+
+            if self._is_occupied_from_color(hsv, cand):
+                continue
 
             if self._is_occupied_from_pointcloud(xyz_base, radius_m, image_stamp_sec):
                 continue

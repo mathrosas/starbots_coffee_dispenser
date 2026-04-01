@@ -56,7 +56,7 @@ static const std::string DEFAULT_BT_XML_REL_PATH =
     "/bt_config/deliver_cup_tree.xml";
 
 // offsets:
-static constexpr double PREGRASP_Z_OFFSET = 0.30; // 25 cm above detected object
+static constexpr double PREGRASP_Z_OFFSET = 0.30; // 30 cm above detected object
 static constexpr double APPROACH_Z_DELTA = 0.10;  // straight down
 static constexpr double PLACE_RETRY_Z_STEP = 0.005; // pre-place retry step
 static constexpr int DETECTION_MAX_ATTEMPTS = 5;
@@ -647,12 +647,6 @@ private:
   BT::NodeStatus bt_return() {
     clear_orientation_constraints();
 
-    setup_named_pose_gripper("close");
-    plan_trajectory_gripper();
-    if (!execute_trajectory_gripper()) {
-      return bt_fail("Failed to close gripper before return");
-    }
-
     // End every attempt at the home pose.
     if (bt_return_home() != BT::NodeStatus::SUCCESS) {
       return bt_fail("Failed final return to home pose");
@@ -691,7 +685,7 @@ private:
 
     place_x_ = active_holder_.position.x;
     place_y_ = active_holder_.position.y;
-    place_z_ = active_holder_.position.z;
+    place_z_ = active_holder_.position.z - 0.015;
 
     cup_x_ = move_group_node_->get_parameter("cup_x").as_double();
     cup_y_ = move_group_node_->get_parameter("cup_y").as_double();
@@ -850,7 +844,7 @@ private:
 
     publish_feedback(active_goal_handle_, "insert_cup", 0.82f,
                      active_holder_id_);
-    const double insert_delta = APPROACH_Z_DELTA;
+    const double insert_delta = 0.5 * APPROACH_Z_DELTA;
     RCLCPP_INFO(
         LOGGER, "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
         place_x_, place_y_, place_z_ + PREGRASP_Z_OFFSET - insert_delta);
