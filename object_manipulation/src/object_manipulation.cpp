@@ -56,7 +56,7 @@ static const std::string DEFAULT_BT_XML_REL_PATH =
     "/bt_config/deliver_cup_tree.xml";
 
 // offsets:
-static constexpr double PREGRASP_Z_OFFSET = 0.30; // 30 cm above detected object
+static constexpr double PREGRASP_Z_OFFSET = 0.30; // 25 cm above detected object
 static constexpr double APPROACH_Z_DELTA = 0.10;  // straight down
 static constexpr double PLACE_RETRY_Z_STEP = 0.005; // pre-place retry step
 static constexpr int DETECTION_MAX_ATTEMPTS = 5;
@@ -546,7 +546,7 @@ private:
       return BT::NodeStatus::SUCCESS;
     });
 
-    if (future_result.wait_for(std::chrono::seconds(60)) !=
+    if (future_result.wait_for(std::chrono::seconds(90)) !=
             std::future_status::ready ||
         future_result.get() != BT::NodeStatus::SUCCESS) {
       move_group_robot_->stop();
@@ -563,7 +563,7 @@ private:
             return bt_move_pre_place(retry_lift, max_attempts) ==
                    BT::NodeStatus::SUCCESS;
           });
-      return future_result.wait_for(std::chrono::seconds(50)) ==
+      return future_result.wait_for(std::chrono::seconds(90)) ==
                  std::future_status::ready &&
              future_result.get();
     };
@@ -621,15 +621,7 @@ private:
       clear_orientation_constraints();
       return BT::NodeStatus::FAILURE;
     }
-    if (bt_post_place_retreat() != BT::NodeStatus::SUCCESS) {
-      // Cup is already released in the target cupholder.
-      // If retreat fails, keep the place result as success and return home.
-      RCLCPP_WARN(LOGGER,
-                  "Post-place retreat failed after cup release; continuing to "
-                  "final return-home.");
-      clear_orientation_constraints();
-      return BT::NodeStatus::SUCCESS;
-    }
+    // Intentionally skip post-place retreat after cup release.
     clear_orientation_constraints();
     return BT::NodeStatus::SUCCESS;
   }
@@ -827,8 +819,7 @@ private:
                      active_holder_id_);
     for (int attempt = 0; attempt < std::max(max_attempts, 1); ++attempt) {
       const double total_lift = retry_lift + attempt * PLACE_RETRY_Z_STEP;
-      const double pre_place_z =
-          place_z_ + PREGRASP_Z_OFFSET + 0.15 + total_lift;
+      const double pre_place_z = place_z_ + PREGRASP_Z_OFFSET + total_lift;
       RCLCPP_INFO(LOGGER, "Going to Pre-place Position (%.3f, %.3f, %.3f)...",
                   place_x_, place_y_, pre_place_z);
       RCLCPP_INFO(LOGGER,
@@ -859,7 +850,7 @@ private:
 
     publish_feedback(active_goal_handle_, "insert_cup", 0.82f,
                      active_holder_id_);
-    const double insert_delta = 2 * APPROACH_Z_DELTA;
+    const double insert_delta = APPROACH_Z_DELTA;
     RCLCPP_INFO(
         LOGGER, "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
         place_x_, place_y_, place_z_ + PREGRASP_Z_OFFSET - insert_delta);
