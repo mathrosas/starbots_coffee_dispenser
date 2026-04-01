@@ -1,4 +1,4 @@
-# Starbots Coffee Cup Dispenser
+# Starbots Coffee Cup Dispenser - Simulation
 
 Simulation branch for my Robotics Developer Masterclass final project.
 
