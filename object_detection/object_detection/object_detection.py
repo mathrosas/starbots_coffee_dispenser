@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -13,6 +13,7 @@ import tf2_ros
 from builtin_interfaces.msg import Duration
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point, PointStamped
+from rclpy.duration import Duration as RclpyDuration
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2
@@ -21,7 +22,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from custom_msgs.msg import DetectedObjects
 from object_detection.geometry import estimate_depth_for_circle, project_pixel_to_3d
 from object_detection.perception_core import Candidate2D, CupholderPerception, PerceptionConfig
-from object_detection.tracker import Detection3D, StableTracker
+from object_detection.tracker import Detection3D, StableTracker, TrackOutput
 
 # Fixed tray-plane normalization settings (non-configurable on purpose).
 _PLANE_ROI_X = (-0.70, -0.20)
@@ -60,13 +61,25 @@ class ObjectDetectionNode(Node):
         self.declare_parameter("annotated_topic", "/barista_cam_annotated")
         self.declare_parameter("annotated_legacy_topic", "/tray_cam_annotated")
         self.declare_parameter("detection_topic", "/cup_holder_detected")
+        self.declare_parameter("raw_detection_topic", "/cup_holder_detected_raw")
         self.declare_parameter("marker_topic", "/cup_holder_markers")
         self.declare_parameter("marker_legacy_topic", "/cup_holder_marker")
+        self.declare_parameter("raw_marker_topic", "/cup_holder_markers_raw")
+        self.declare_parameter("raw_marker_legacy_topic", "/cup_holder_marker_raw")
+        self.declare_parameter("publish_raw_stream", True)
+        self.declare_parameter("show_unconfirmed_annotation", False)
 
         # Depth / geometry
         self.declare_parameter("depth_scale", 0.001)
         self.declare_parameter("min_depth_m", 0.02)
         self.declare_parameter("max_depth_m", 3.0)
+        self.declare_parameter("max_depth_age_sec", 0.10)
+        self.declare_parameter("min_depth_valid_samples", 24)
+        self.declare_parameter("min_depth_confidence", 0.10)
+        self.declare_parameter("min_detection_score", 0.42)
+        # self.declare_parameter("min_depth_valid_samples", 24)
+        # self.declare_parameter("min_depth_confidence", 0.25)
+        # self.declare_parameter("min_detection_score", 0.42)
 
         # Perception params
         self.declare_parameter("roi_width_ratio", 0.75)
@@ -77,9 +90,13 @@ class ObjectDetectionNode(Node):
         # Tracker params
         self.declare_parameter("max_ids", 4)
         self.declare_parameter("match_distance_m", 0.06)
-        self.declare_parameter("ema_alpha", 0.45)
-        self.declare_parameter("min_confirm_frames", 3)
-        self.declare_parameter("max_missed_frames", 6)
+        self.declare_parameter("ema_alpha", 0.30)
+        self.declare_parameter("min_confirm_frames", 4)
+        self.declare_parameter("max_missed_frames", 10)
+        self.declare_parameter("stable_ema_alpha", 0.30)
+        self.declare_parameter("stable_deadband_m", 0.003)
+        self.declare_parameter("stable_hold_sec", 0.80)
+        self.declare_parameter("stable_publish_rate_hz", 10.0)
 
         # Marker / object geometry defaults
         self.declare_parameter("text_height_offset", 0.10)
@@ -96,6 +113,15 @@ class ObjectDetectionNode(Node):
         self.depth_scale = float(self.get_parameter("depth_scale").value)
         self.min_depth_m = float(self.get_parameter("min_depth_m").value)
         self.max_depth_m = float(self.get_parameter("max_depth_m").value)
+        self.max_depth_age_sec = float(self.get_parameter("max_depth_age_sec").value)
+        self.min_depth_valid_samples = int(self.get_parameter("min_depth_valid_samples").value)
+        self.min_depth_confidence = float(self.get_parameter("min_depth_confidence").value)
+        self.min_detection_score = float(self.get_parameter("min_detection_score").value)
+
+        self.publish_raw_stream = bool(self.get_parameter("publish_raw_stream").value)
+        self.show_unconfirmed_annotation = bool(
+            self.get_parameter("show_unconfirmed_annotation").value
+        )
 
         self.text_height_offset = float(self.get_parameter("text_height_offset").value)
         self.default_hole_height = float(self.get_parameter("default_hole_height").value)
@@ -104,6 +130,19 @@ class ObjectDetectionNode(Node):
         self.min_cupholder_separation_m = float(
             self.get_parameter("min_cupholder_separation_m").value
         )
+        self.stable_ema_alpha = float(
+            np.clip(float(self.get_parameter("stable_ema_alpha").value), 0.0, 1.0)
+        )
+        self.stable_deadband_m = float(
+            max(0.0, float(self.get_parameter("stable_deadband_m").value))
+        )
+        self.stable_hold_sec = float(
+            max(0.0, float(self.get_parameter("stable_hold_sec").value))
+        )
+        stable_publish_rate_hz = float(
+            max(0.1, float(self.get_parameter("stable_publish_rate_hz").value))
+        )
+        self.stable_publish_interval_sec = 1.0 / stable_publish_rate_hz
 
         p_cfg = PerceptionConfig(
             roi_width_ratio=float(self.get_parameter("roi_width_ratio").value),
@@ -124,6 +163,7 @@ class ObjectDetectionNode(Node):
         self.bridge = CvBridge()
         self.k_matrix: Optional[np.ndarray] = None
         self.last_depth_m: Optional[np.ndarray] = None
+        self.last_depth_stamp_sec: float = 0.0
         self.last_roi_points: Optional[np.ndarray] = None
         self.last_roi_frame: str = ""
         self.last_roi_stamp_sec: float = 0.0
@@ -131,6 +171,11 @@ class ObjectDetectionNode(Node):
         self.tray_plane: Optional[tuple[np.ndarray, float]] = None
         self.tray_plane_stamp_sec: float = 0.0
         self.rng = np.random.default_rng(42)
+        self.stable_positions: Dict[int, np.ndarray] = {}
+        self.stable_radii: Dict[int, float] = {}
+        self.stable_scores: Dict[int, float] = {}
+        self.stable_last_seen: Dict[int, float] = {}
+        self.last_stable_pub_sec: float = 0.0
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -144,11 +189,20 @@ class ObjectDetectionNode(Node):
         self.detection_pub = self.create_publisher(
             DetectedObjects, str(self.get_parameter("detection_topic").value), 10
         )
+        self.raw_detection_pub = self.create_publisher(
+            DetectedObjects, str(self.get_parameter("raw_detection_topic").value), 10
+        )
         self.marker_pub = self.create_publisher(
             MarkerArray, str(self.get_parameter("marker_topic").value), 10
         )
         self.marker_legacy_pub = self.create_publisher(
             MarkerArray, str(self.get_parameter("marker_legacy_topic").value), 10
+        )
+        self.raw_marker_pub = self.create_publisher(
+            MarkerArray, str(self.get_parameter("raw_marker_topic").value), 10
+        )
+        self.raw_marker_legacy_pub = self.create_publisher(
+            MarkerArray, str(self.get_parameter("raw_marker_legacy_topic").value), 10
         )
 
         self.create_subscription(Image, depth_topic, self._depth_cb, qos_profile_sensor_data)
@@ -176,6 +230,9 @@ class ObjectDetectionNode(Node):
             self.last_depth_m = depth.astype(np.float32) * self.depth_scale
         else:
             self.last_depth_m = depth.astype(np.float32)
+        self.last_depth_stamp_sec = (
+            float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        )
 
     def _fit_plane_ransac(self, points_xyz: np.ndarray) -> Optional[tuple[np.ndarray, float]]:
         point_count = points_xyz.shape[0]
@@ -342,19 +399,41 @@ class ObjectDetectionNode(Node):
 
         return normalized
 
-    def _to_base_link(self, xyz_cam: tuple[float, float, float], source_frame: str) -> Optional[np.ndarray]:
+    def _to_base_link(
+        self,
+        xyz_cam: tuple[float, float, float],
+        source_frame: str,
+        source_stamp_sec: float,
+    ) -> Optional[np.ndarray]:
         ps = PointStamped()
         ps.header.frame_id = source_frame
-        ps.header.stamp = self.get_clock().now().to_msg()
+        source_time = rclpy.time.Time(nanoseconds=int(source_stamp_sec * 1e9))
+        ps.header.stamp = source_time.to_msg()
         ps.point.x, ps.point.y, ps.point.z = xyz_cam
 
         try:
-            tf = self.tf_buffer.lookup_transform(self.target_frame, source_frame, rclpy.time.Time())
+            tf = self.tf_buffer.lookup_transform(
+                self.target_frame,
+                source_frame,
+                source_time,
+                timeout=RclpyDuration(seconds=0.05),
+            )
             p_out = tf2_geometry_msgs.do_transform_point(ps, tf)
             return np.array([p_out.point.x, p_out.point.y, p_out.point.z], dtype=float)
-        except Exception as exc:
-            self.get_logger().warn(f"TF transform failed: {exc}")
-            return None
+        except Exception:
+            # Fallback to latest TF if exact timestamp transform is unavailable.
+            try:
+                tf_latest = self.tf_buffer.lookup_transform(
+                    self.target_frame,
+                    source_frame,
+                    rclpy.time.Time(),
+                    timeout=RclpyDuration(seconds=0.05),
+                )
+                p_out = tf2_geometry_msgs.do_transform_point(ps, tf_latest)
+                return np.array([p_out.point.x, p_out.point.y, p_out.point.z], dtype=float)
+            except Exception as exc:
+                self.get_logger().warn(f"TF transform failed: {exc}")
+                return None
 
     def _apply_min_separation(
         self,
@@ -394,7 +473,14 @@ class ObjectDetectionNode(Node):
         filtered_candidates = [candidates[i] for i in kept_in_input_order]
         return filtered_detections, filtered_candidates
 
-    def _publish_markers(self, tracks: List, positions: List[np.ndarray]) -> None:
+    def _publish_markers(
+        self,
+        tracks: List[TrackOutput],
+        positions: List[np.ndarray],
+        marker_pub,
+        marker_legacy_pub,
+        namespace: str = "fused",
+    ) -> None:
         marker_array = MarkerArray()
         now = self.get_clock().now().to_msg()
 
@@ -402,7 +488,7 @@ class ObjectDetectionNode(Node):
             marker = Marker()
             marker.header.frame_id = self.target_frame
             marker.header.stamp = now
-            marker.ns = "fused"
+            marker.ns = namespace
             marker.id = int(tr.track_id)
             marker.type = Marker.CYLINDER
             marker.action = Marker.ADD
@@ -423,7 +509,7 @@ class ObjectDetectionNode(Node):
             text = Marker()
             text.header.frame_id = self.target_frame
             text.header.stamp = now
-            text.ns = "enum"
+            text.ns = f"{namespace}_enum"
             text.id = 1000 + int(tr.track_id)
             text.type = Marker.TEXT_VIEW_FACING
             text.action = Marker.ADD
@@ -440,10 +526,15 @@ class ObjectDetectionNode(Node):
             text.text = str(int(tr.track_id) + 1)
             marker_array.markers.append(text)
 
-        self.marker_pub.publish(marker_array)
-        self.marker_legacy_pub.publish(marker_array)
+        marker_pub.publish(marker_array)
+        marker_legacy_pub.publish(marker_array)
 
-    def _publish_detections(self, tracks: List, positions: List[np.ndarray]) -> None:
+    def _publish_detections(
+        self,
+        tracks: List[TrackOutput],
+        positions: List[np.ndarray],
+        detection_pub,
+    ) -> None:
         for tr, pos in zip(tracks, positions):
             msg = DetectedObjects()
             msg.object_id = int(tr.track_id) + 1
@@ -455,7 +546,7 @@ class ObjectDetectionNode(Node):
             msg.width = float(2.0 * tr.radius_m)
             msg.thickness = float(2.0 * tr.radius_m)
             msg.height = self.default_hole_height
-            self.detection_pub.publish(msg)
+            detection_pub.publish(msg)
 
     def _annotate(self, bgr: np.ndarray, candidates: List[Candidate2D], track_outputs: List) -> np.ndarray:
         out = bgr.copy()
@@ -467,24 +558,98 @@ class ObjectDetectionNode(Node):
             cv2.circle(out, (cand.u, cand.v), int(round(cand.radius_px)), (255, 0, 0), 2)
             cv2.circle(out, (cand.u, cand.v), 2, (255, 0, 0), -1)
 
-            label = "?"
+            draw_label = False
+            label = ""
             color = (180, 180, 180)
             if i in id_by_candidate and id_by_candidate[i].confirmed:
                 label = str(id_by_candidate[i].track_id + 1)
                 color = (255, 0, 0)
+                draw_label = True
+            elif self.show_unconfirmed_annotation:
+                label = "?"
+                draw_label = True
 
-            cv2.putText(
-                out,
-                label,
-                (cand.u + 5, cand.v - 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                color,
-                2,
-                cv2.LINE_AA,
-            )
+            if draw_label:
+                cv2.putText(
+                    out,
+                    label,
+                    (cand.u + 5, cand.v - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
 
         return out
+
+    def _stabilize_tracks(
+        self,
+        tracks: List[TrackOutput],
+        positions: List[np.ndarray],
+        now_sec: float,
+    ) -> Tuple[List[TrackOutput], List[np.ndarray]]:
+        stabilized_tracks: List[TrackOutput] = []
+        stabilized_positions: List[np.ndarray] = []
+        seen_ids = set()
+
+        for tr, pos in zip(tracks, positions):
+            tid = int(tr.track_id)
+            seen_ids.add(tid)
+            current = np.asarray(pos, dtype=float)
+            previous = self.stable_positions.get(tid)
+            if previous is None:
+                stable_pos = current
+            else:
+                delta = float(np.linalg.norm(current - previous))
+                if delta <= self.stable_deadband_m:
+                    stable_pos = previous.copy()
+                else:
+                    stable_pos = (
+                        self.stable_ema_alpha * current
+                        + (1.0 - self.stable_ema_alpha) * previous
+                    )
+
+            self.stable_positions[tid] = stable_pos
+            self.stable_radii[tid] = float(tr.radius_m)
+            self.stable_scores[tid] = float(tr.score)
+            self.stable_last_seen[tid] = now_sec
+
+            stabilized_tracks.append(
+                TrackOutput(
+                    track_id=tid,
+                    position=stable_pos.copy(),
+                    radius_m=float(self.stable_radii[tid]),
+                    score=float(self.stable_scores[tid]),
+                    confirmed=True,
+                )
+            )
+            stabilized_positions.append(stable_pos.copy())
+
+        for tid in sorted(list(self.stable_positions.keys())):
+            if tid in seen_ids:
+                continue
+            age = now_sec - self.stable_last_seen.get(tid, now_sec)
+            if age <= self.stable_hold_sec:
+                hold_pos = self.stable_positions[tid].copy()
+                stabilized_tracks.append(
+                    TrackOutput(
+                        track_id=tid,
+                        position=hold_pos.copy(),
+                        radius_m=float(self.stable_radii.get(tid, 0.03)),
+                        score=float(self.stable_scores.get(tid, 0.0)),
+                        confirmed=True,
+                    )
+                )
+                stabilized_positions.append(hold_pos)
+                continue
+
+            self.stable_positions.pop(tid, None)
+            self.stable_radii.pop(tid, None)
+            self.stable_scores.pop(tid, None)
+            self.stable_last_seen.pop(tid, None)
+
+        return stabilized_tracks, stabilized_positions
 
     def _image_cb(self, msg: Image) -> None:
         if self.k_matrix is None or self.last_depth_m is None:
@@ -493,6 +658,10 @@ class ObjectDetectionNode(Node):
         image_stamp_sec = (
             float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         )
+        depth_age_sec = abs(image_stamp_sec - self.last_depth_stamp_sec)
+        if depth_age_sec > self.max_depth_age_sec:
+            return
+
         bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         candidates, _ = self.perception.detect(bgr)
 
@@ -508,16 +677,19 @@ class ObjectDetectionNode(Node):
                 cand.radius_px,
                 self.min_depth_m,
                 self.max_depth_m,
+                min_valid_samples=self.min_depth_valid_samples,
             )
             if depth_result is None:
                 continue
 
             z, depth_conf = depth_result
+            if depth_conf < self.min_depth_confidence:
+                continue
             xyz_cam = project_pixel_to_3d(cand.u, cand.v, z, self.k_matrix)
             if xyz_cam is None:
                 continue
 
-            xyz_base = self._to_base_link(xyz_cam, msg.header.frame_id)
+            xyz_base = self._to_base_link(xyz_cam, msg.header.frame_id, image_stamp_sec)
             if xyz_base is None:
                 continue
 
@@ -526,10 +698,12 @@ class ObjectDetectionNode(Node):
             else:
                 radius_m = float(np.clip(z * cand.radius_px / fx, self.min_hole_radius_m, self.max_hole_radius_m))
 
-            if self._is_occupied_from_pointcloud(xyz_base, radius_m, image_stamp_sec):
-                continue
+            # if self._is_occupied_from_pointcloud(xyz_base, radius_m, image_stamp_sec):
+            #     continue
 
             score = float(np.clip(0.65 * cand.score + 0.35 * depth_conf, 0.0, 1.0))
+            if score < self.min_detection_score:
+                continue
             detections_3d.append(Detection3D(position=xyz_base, radius_m=radius_m, score=score))
             kept_candidates.append(cand)
 
@@ -540,10 +714,39 @@ class ObjectDetectionNode(Node):
         track_outputs = self.tracker.update(detections_3d)
         confirmed_tracks = self.tracker.confirmed_tracks()
 
-        if confirmed_tracks:
-            normalized_positions = self._normalized_positions(confirmed_tracks)
-            self._publish_markers(confirmed_tracks, normalized_positions)
-            self._publish_detections(confirmed_tracks, normalized_positions)
+        if self.publish_raw_stream and track_outputs:
+            raw_positions = [np.asarray(tr.position, dtype=float).copy() for tr in track_outputs]
+            self._publish_markers(
+                track_outputs,
+                raw_positions,
+                self.raw_marker_pub,
+                self.raw_marker_legacy_pub,
+                namespace="raw",
+            )
+            self._publish_detections(track_outputs, raw_positions, self.raw_detection_pub)
+
+        normalized_positions = (
+            self._normalized_positions(confirmed_tracks) if confirmed_tracks else []
+        )
+        stable_tracks, stable_positions = self._stabilize_tracks(
+            confirmed_tracks, normalized_positions, image_stamp_sec
+        )
+        if (
+            stable_tracks
+            and image_stamp_sec - self.last_stable_pub_sec
+            >= self.stable_publish_interval_sec
+        ):
+            self._publish_markers(
+                stable_tracks,
+                stable_positions,
+                self.marker_pub,
+                self.marker_legacy_pub,
+                namespace="fused",
+            )
+            self._publish_detections(
+                stable_tracks, stable_positions, self.detection_pub
+            )
+            self.last_stable_pub_sec = image_stamp_sec
 
         annotated = self._annotate(bgr, kept_candidates, track_outputs)
         out_msg = self.bridge.cv2_to_imgmsg(annotated, encoding="bgr8")
