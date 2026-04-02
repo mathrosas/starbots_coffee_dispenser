@@ -576,10 +576,10 @@ private:
     };
 
     if (!bt_rotated_to_place_) {
-      clear_orientation_constraints();
-      if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
-        return BT::NodeStatus::FAILURE;
-      }
+    //   clear_orientation_constraints();
+    //   if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
+    //     return BT::NodeStatus::FAILURE;
+    //   }
       bt_rotated_to_place_ = true;
     }
 
@@ -844,7 +844,7 @@ private:
 
     publish_feedback(active_goal_handle_, "insert_cup", 0.82f,
                      active_holder_id_);
-    const double insert_delta = 0.5 * APPROACH_Z_DELTA;
+    const double insert_delta = 0.2 * APPROACH_Z_DELTA;
     RCLCPP_INFO(
         LOGGER, "Approaching down to Place Position (%.3f, %.3f, %.3f)...",
         place_x_, place_y_, place_z_ + PREGRASP_Z_OFFSET - insert_delta);
