@@ -123,20 +123,20 @@ public:
     move_group_gripper_ = std::make_shared<MoveGroupInterface>(
         move_group_node_, PLANNING_GROUP_GRIPPER);
 
-    move_group_robot_->setPoseReferenceFrame(REF_FRAME);
+    // move_group_robot_->setPoseReferenceFrame(REF_FRAME);
     move_group_robot_->setPlanningTime(20.0);
-    move_group_robot_->setNumPlanningAttempts(20);
-    move_group_robot_->setGoalPositionTolerance(0.0005);
-    move_group_robot_->setGoalOrientationTolerance(0.05);
-    move_group_robot_->setMaxVelocityScalingFactor(0.1);
-    move_group_robot_->setMaxAccelerationScalingFactor(0.05);
+    // move_group_robot_->setNumPlanningAttempts(20);
+    // move_group_robot_->setGoalPositionTolerance(0.0005);
+    // move_group_robot_->setGoalOrientationTolerance(0.05);
+    // move_group_robot_->setMaxVelocityScalingFactor(0.1);
+    // move_group_robot_->setMaxAccelerationScalingFactor(0.05);
     // move_group_robot_->setMaxVelocityScalingFactor(0.08);
     // move_group_robot_->setMaxAccelerationScalingFactor(0.03);
 
-    move_group_gripper_->setGoalTolerance(0.0001);
-    move_group_gripper_->setMaxVelocityScalingFactor(
-        0.1); // Slow for precise/less jittery close
-    move_group_gripper_->setMaxAccelerationScalingFactor(0.05);
+    // move_group_gripper_->setGoalTolerance(0.0001);
+    // move_group_gripper_->setMaxVelocityScalingFactor(
+    //     0.1); // Slow for precise/less jittery close
+    // move_group_gripper_->setMaxAccelerationScalingFactor(0.05);
     // move_group_gripper_->setMaxVelocityScalingFactor(
     //     0.01); // Slow for precise/less jittery close
     // move_group_gripper_->setMaxAccelerationScalingFactor(0.01);
