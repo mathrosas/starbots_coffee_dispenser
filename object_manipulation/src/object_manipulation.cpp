@@ -125,6 +125,11 @@ public:
 
     move_group_robot_->setPoseReferenceFrame(REF_FRAME);
     move_group_robot_->setPlanningTime(20.0);
+    move_group_robot_->setNumPlanningAttempts(20);
+    move_group_robot_->setGoalPositionTolerance(0.0005);
+    move_group_robot_->setGoalOrientationTolerance(0.05);
+
+    move_group_gripper_->setGoalTolerance(0.0001);
 
     move_group_robot_->startStateMonitor();
     move_group_gripper_->startStateMonitor();
@@ -561,10 +566,10 @@ private:
     };
 
     if (!bt_rotated_to_place_) {
-    //   clear_orientation_constraints();
-    //   if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
-    //     return BT::NodeStatus::FAILURE;
-    //   }
+      //   clear_orientation_constraints();
+      //   if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
+      //     return BT::NodeStatus::FAILURE;
+      //   }
       bt_rotated_to_place_ = true;
     }
 
