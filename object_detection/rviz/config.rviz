@@ -168,43 +168,6 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        wrist_rgbd_camera_depth_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        wrist_rgbd_camera_depth_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        wrist_rgbd_camera_fisheye_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        wrist_rgbd_camera_fisheye_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        wrist_rgbd_camera_left_ir_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        wrist_rgbd_camera_left_ir_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        wrist_rgbd_camera_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_rgbd_camera_right_ir_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        wrist_rgbd_camera_right_ir_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
       Mass Properties:
         Inertia: false
         Mass: false
@@ -218,33 +181,17 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: true
-        barista_1/barista_bottom_link:
+        D415_color_frame:
           Value: true
-        barista_1/barista_top_link:
+        D415_color_optical_frame:
           Value: true
-        barista_1/base_footprint:
+        D415_depth_frame:
           Value: true
-        barista_1/base_link:
+        D415_depth_optical_frame:
           Value: true
-        barista_1/caster_back_link:
+        D415_link:
           Value: true
-        barista_1/caster_front_link:
-          Value: true
-        barista_1/cliff_sensor_front_link:
-          Value: true
-        barista_1/cliff_sensor_left_link:
-          Value: true
-        barista_1/cliff_sensor_right_link:
-          Value: true
-        barista_1/gyro_link:
-          Value: true
-        barista_1/laser_sensor_link:
-          Value: true
-        barista_1/odom:
-          Value: true
-        barista_1/wheel_left_link:
-          Value: true
-        barista_1/wheel_right_link:
+        aruco_link:
           Value: true
         base:
           Value: true
@@ -280,6 +227,8 @@ Visualization Manager:
           Value: true
         tool0:
           Value: true
+        tool0_controller:
+          Value: true
         upper_arm_link:
           Value: true
         world:
@@ -290,24 +239,6 @@ Visualization Manager:
           Value: true
         wrist_3_link:
           Value: true
-        wrist_rgbd_camera_depth_frame:
-          Value: true
-        wrist_rgbd_camera_depth_optical_frame:
-          Value: true
-        wrist_rgbd_camera_fisheye_frame:
-          Value: true
-        wrist_rgbd_camera_fisheye_optical_frame:
-          Value: true
-        wrist_rgbd_camera_left_ir_frame:
-          Value: true
-        wrist_rgbd_camera_left_ir_optical_frame:
-          Value: true
-        wrist_rgbd_camera_link:
-          Value: true
-        wrist_rgbd_camera_right_ir_frame:
-          Value: true
-        wrist_rgbd_camera_right_ir_optical_frame:
-          Value: true
       Marker Scale: 0.5
       Name: TF
       Show Arrows: true
@@ -315,34 +246,17 @@ Visualization Manager:
       Show Names: false
       Tree:
         world:
-          barista_1/odom:
-            barista_1/base_footprint:
-              barista_1/base_link:
-                barista_1/barista_bottom_link:
-                  {}
-                barista_1/barista_top_link:
-                  {}
-                barista_1/caster_back_link:
-                  {}
-                barista_1/caster_front_link:
-                  {}
-                barista_1/cliff_sensor_front_link:
-                  {}
-                barista_1/cliff_sensor_left_link:
-                  {}
-                barista_1/cliff_sensor_right_link:
-                  {}
-                barista_1/gyro_link:
-                  {}
-                barista_1/laser_sensor_link:
-                  {}
-                barista_1/wheel_left_link:
-                  {}
-                barista_1/wheel_right_link:
-                  {}
+          D415_link:
+            D415_color_frame:
+              D415_color_optical_frame:
+                {}
+            D415_depth_frame:
+              D415_depth_optical_frame:
+                {}
           base_link:
             base:
-              {}
+              tool0_controller:
+                {}
             base_link_inertia:
               shoulder_link:
                 upper_arm_link:
@@ -353,6 +267,8 @@ Visualization Manager:
                           flange:
                             tool0:
                               robotiq_85_base_link:
+                                aruco_link:
+                                  {}
                                 robotiq_85_left_inner_knuckle_link:
                                   robotiq_85_left_finger_tip_link:
                                     {}
@@ -367,19 +283,6 @@ Visualization Manager:
                                     {}
                           ft_frame:
                             {}
-            wrist_rgbd_camera_link:
-              wrist_rgbd_camera_depth_frame:
-                wrist_rgbd_camera_depth_optical_frame:
-                  {}
-                wrist_rgbd_camera_fisheye_frame:
-                  wrist_rgbd_camera_fisheye_optical_frame:
-                    {}
-                wrist_rgbd_camera_left_ir_frame:
-                  wrist_rgbd_camera_left_ir_optical_frame:
-                    {}
-                wrist_rgbd_camera_right_ir_frame:
-                  wrist_rgbd_camera_right_ir_optical_frame:
-                    {}
       Update Interval: 0
       Value: true
     - Alpha: 1
@@ -420,9 +323,7 @@ Visualization Manager:
       Enabled: true
       Name: Cup_holders
       Namespaces:
-        enum: true
-        fused: true
-        hough: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -450,7 +351,7 @@ Visualization Manager:
       Robot Description: robot_description
       Scene Geometry:
         Scene Alpha: 0.8999999761581421
-        Scene Color: 0; 0; 0
+        Scene Color: 255; 255; 255
         Scene Display Time: 0.009999999776482582
         Show Scene Geometry: true
         Voxel Coloring: Z-Axis

@@ -442,7 +442,7 @@
     "StateTransitions!2czkeo0": {
       "paths": [
         {
-          "value": "/bt_node_status.data",
+          "value": "/robot_status_feedback.data",
           "timestampMethod": "receiveTime",
           "customStates": {
             "type": "discrete",
@@ -450,7 +450,7 @@
           }
         },
         {
-          "value": "/robot_status_feedback.data",
+          "value": "/bt_node_status.data",
           "timestampMethod": "receiveTime",
           "customStates": {
             "type": "discrete",
