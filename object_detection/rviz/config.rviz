@@ -420,9 +420,8 @@ Visualization Manager:
       Enabled: true
       Name: Cup_holders
       Namespaces:
-        enum: true
         fused: true
-        hough: true
+        fused_enum: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -450,7 +449,7 @@ Visualization Manager:
       Robot Description: robot_description
       Scene Geometry:
         Scene Alpha: 0.8999999761581421
-        Scene Color: 0; 0; 0
+        Scene Color: 255; 255; 255
         Scene Display Time: 0.009999999776482582
         Show Scene Geometry: true
         Voxel Coloring: Z-Axis
