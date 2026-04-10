@@ -95,7 +95,7 @@ class ObjectDetectionNode(Node):
         self.declare_parameter("occupancy_depth_threshold_m", 0.018)  # min depth delta to call occupied
         self.declare_parameter("occupancy_depth_weight", 0.0)
         self.declare_parameter("occupancy_bright_weight", 1.0)
-        self.declare_parameter("occupancy_score_threshold", 0.35)
+        self.declare_parameter("occupancy_score_threshold", 0.25) # 0.5 should be the perfect threshold, not working right now
 
         # Marker / object geometry defaults
         self.declare_parameter("text_height_offset", 0.10)
@@ -182,7 +182,8 @@ class ObjectDetectionNode(Node):
         self.stable_radii: Dict[int, float] = {}
         self.stable_scores: Dict[int, float] = {}
         self.stable_last_seen: Dict[int, float] = {}
-        self.stable_occupied: Dict[int, bool] = {}  # per-track occupancy state
+        self.stable_occupied: Dict[int, bool] = {}
+        self.occupancy_vote: Dict[int, float] = {}  # running EMA score per track
         self.last_stable_pub_sec: float = 0.0
 
         self.tf_buffer = tf2_ros.Buffer()
@@ -725,7 +726,7 @@ class ObjectDetectionNode(Node):
             f"[occ] u={u} v={v}  depth_score={depth_score:.3f}  "
             f"bright_score={bright_score:.3f}  combined={combined:.3f}"
         )
-        return combined > self.occupancy_score_threshold
+        return combined  # return raw score, decision made in _image_cb
 
     def _image_cb(self, msg: Image) -> None:
         if self.k_matrix is None or self.last_depth_m is None:
@@ -786,7 +787,7 @@ class ObjectDetectionNode(Node):
 
         # Classify occupancy for every candidate that survived filtering.
         # kept_candidates and detections_3d are index-aligned at this point.
-        candidate_occupied: List[bool] = [
+        candidate_occupied: List[float] = [
             self._classify_occupancy(cand.u, cand.v, cand.radius_px, self.last_depth_m, bgr)
             for cand in kept_candidates
         ]
@@ -797,8 +798,12 @@ class ObjectDetectionNode(Node):
         # track_outputs is index-aligned with kept_candidates (same order, same
         # length -- the tracker update preserves input order). Store per-track
         # occupancy so _publish_detections and _annotate can read it.
-        for tr, occ in zip(track_outputs, candidate_occupied):
-            self.stable_occupied[int(tr.track_id)] = occ
+        for tr, score in zip(track_outputs, candidate_occupied):
+            tid = int(tr.track_id)
+            prev = self.occupancy_vote.get(tid, 0.0)
+            # EMA smoothing: alpha=0.25 means ~4 frames to change state
+            self.occupancy_vote[tid] = 0.25 * score + 0.75 * prev
+            self.stable_occupied[tid] = self.occupancy_vote[tid] > self.occupancy_score_threshold
 
         if self.publish_raw_stream and track_outputs:
             raw_positions = [np.asarray(tr.position, dtype=float).copy() for tr in track_outputs]
