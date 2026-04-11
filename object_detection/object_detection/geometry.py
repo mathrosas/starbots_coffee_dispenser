@@ -18,7 +18,7 @@ def estimate_depth_for_circle(
     if not (0 <= u < w and 0 <= v < h):
         return None
 
-    outer = max(3, int(round(radius_px * 0.95)))
+    outer = max(3, int(round(radius_px * 1.40)))
     inner = max(2, int(round(radius_px * 0.45)))
 
     y0 = max(0, v - outer)

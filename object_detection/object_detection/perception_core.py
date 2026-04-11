@@ -106,9 +106,14 @@ class CupholderPerception:
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         candidates: List[Candidate2D] = []
 
+        # print(f"[DEBUG] Total contours found: {len(contours)}") # Debug for cupholder detection
+
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < self.cfg.min_contour_area or area > self.cfg.max_contour_area:
+                if area > 50:  # only log non-tiny contours
+                    (u, v), radius = cv2.minEnclosingCircle(cnt)
+                    # print(f"[DEBUG] REJECTED area: u={int(u)} v={int(v)} area={area:.0f} bounds=[{self.cfg.min_contour_area}, {self.cfg.max_contour_area}]") # Debug for cupholder detection
                 continue
 
             perimeter = cv2.arcLength(cnt, True)
@@ -117,10 +122,41 @@ class CupholderPerception:
 
             circularity = float(4.0 * np.pi * area / (perimeter * perimeter))
             if circularity < self.cfg.min_circularity:
+                (u_dbg, v_dbg), _ = cv2.minEnclosingCircle(cnt)
+                # print(f"[DEBUG] REJECTED circularity: u={int(u_dbg)} v={int(v_dbg)} area={area:.0f} circ={circularity:.3f} min={self.cfg.min_circularity}") # Debug for cupholder detection
+                # Ellipse fallback: accept elongated cupholders seen at an angle
+                if len(cnt) >= 5:
+                    try:
+                        ellipse = cv2.fitEllipse(cnt)
+                        (eu, ev), (minor_ax, major_ax), _angle = ellipse
+                        if minor_ax > 1e-3:
+                            aspect = major_ax / minor_ax
+                            equiv_r = (minor_ax + major_ax) / 4.0
+                            # print(f"[DEBUG] ELLIPSE: u={int(round(eu))} v={int(round(ev))} aspect={aspect:.2f} equiv_r={equiv_r:.1f} pass={aspect < 2.5 and equiv_r >= self.cfg.min_radius_px * 0.5}") # Debug for cupholder detection
+                            if aspect < 2.5 and equiv_r >= self.cfg.min_radius_px * 0.5:
+                                contrast = self._circle_contrast(
+                                    proc_gray,
+                                    int(round(eu)),
+                                    int(round(ev)),
+                                    equiv_r,
+                                )
+                                shape_q = 1.0 / aspect
+                                _score = 0.50 * shape_q + 0.30 * contrast
+                                candidates.append(
+                                    Candidate2D(
+                                        u=int(round(eu)),
+                                        v=int(round(ev)),
+                                        radius_px=float(equiv_r),
+                                        score=float(np.clip(_score, 0.0, 1.0)),
+                                    )
+                                )
+                    except cv2.error:
+                        pass
                 continue
 
             (u, v), radius = cv2.minEnclosingCircle(cnt)
             if radius < self.cfg.min_radius_px or radius > self.cfg.max_radius_px:
+                # print(f"[DEBUG] REJECTED radius: u={int(u)} v={int(v)} r={radius:.1f} bounds=[{self.cfg.min_radius_px}, {self.cfg.max_radius_px}]") # Debug for cupholder detection
                 continue
 
             contrast = self._circle_contrast(proc_gray, int(round(u)), int(round(v)), radius)
@@ -134,6 +170,7 @@ class CupholderPerception:
                     score=float(np.clip(score, 0.0, 1.0)),
                 )
             )
+            # print(f"[DEBUG] ACCEPTED: u={int(round(u))} v={int(round(v))} r={radius:.1f} area={area:.0f} circ={circularity:.3f} score={score:.3f}") # Debug for cupholder detection
 
         return candidates
 

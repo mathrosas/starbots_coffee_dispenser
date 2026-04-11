@@ -60,14 +60,14 @@ class ObjectDetectionNode(Node):
         self.declare_parameter("raw_marker_topic", "/cup_holder_markers_raw")
         self.declare_parameter("raw_marker_legacy_topic", "/cup_holder_marker_raw")
         self.declare_parameter("publish_raw_stream", True)
-        self.declare_parameter("show_unconfirmed_annotation", False)
+        self.declare_parameter("show_unconfirmed_annotation", True)
 
         # Depth / geometry
         self.declare_parameter("depth_scale", 0.001)
         self.declare_parameter("min_depth_m", 0.02)
         self.declare_parameter("max_depth_m", 3.0)
         self.declare_parameter("max_depth_age_sec", 0.50)
-        self.declare_parameter("min_depth_valid_samples", 24)
+        self.declare_parameter("min_depth_valid_samples", 10)
         self.declare_parameter("min_depth_confidence", 0.10)
         self.declare_parameter("min_detection_score", 0.42)
         # self.declare_parameter("min_depth_valid_samples", 24)
@@ -82,20 +82,20 @@ class ObjectDetectionNode(Node):
 
         # Tracker params
         self.declare_parameter("max_ids", 4)
-        self.declare_parameter("match_distance_m", 0.06)
+        self.declare_parameter("match_distance_m", 0.04)
         self.declare_parameter("ema_alpha", 0.30)
-        self.declare_parameter("min_confirm_frames", 4)
-        self.declare_parameter("max_missed_frames", 10)
+        self.declare_parameter("min_confirm_frames", 7)
+        self.declare_parameter("max_missed_frames", 20)
         self.declare_parameter("stable_ema_alpha", 0.30)
         self.declare_parameter("stable_deadband_m", 0.003)
-        self.declare_parameter("stable_hold_sec", 0.80)
+        self.declare_parameter("stable_hold_sec", 1.50)
         self.declare_parameter("stable_publish_rate_hz", 10.0)
 
         # Occupancy classification parameters
         self.declare_parameter("occupancy_depth_threshold_m", 0.018)  # min depth delta to call occupied
         self.declare_parameter("occupancy_depth_weight", 0.0)
         self.declare_parameter("occupancy_bright_weight", 1.0)
-        self.declare_parameter("occupancy_score_threshold", 0.25) # 0.5 should be the perfect threshold, not working right now
+        self.declare_parameter("occupancy_score_threshold", 0.35) # 0.5 should be the perfect threshold, not working right now
 
         # Marker / object geometry defaults
         self.declare_parameter("text_height_offset", 0.10)
@@ -722,10 +722,10 @@ class ObjectDetectionNode(Node):
             self.occupancy_depth_weight * depth_score
             + self.occupancy_bright_weight * bright_score
         )
-        self.get_logger().info(
-            f"[occ] u={u} v={v}  depth_score={depth_score:.3f}  "
-            f"bright_score={bright_score:.3f}  combined={combined:.3f}"
-        )
+        # self.get_logger().info(
+        #     f"[occ] u={u} v={v}  depth_score={depth_score:.3f}  "
+        #     f"bright_score={bright_score:.3f}  combined={combined:.3f}"
+        # ) # Debug for cupholder detection
         return combined  # return raw score, decision made in _image_cb
 
     def _image_cb(self, msg: Image) -> None:
@@ -800,10 +800,13 @@ class ObjectDetectionNode(Node):
         # occupancy so _publish_detections and _annotate can read it.
         for tr, score in zip(track_outputs, candidate_occupied):
             tid = int(tr.track_id)
-            prev = self.occupancy_vote.get(tid, 0.0)
-            # EMA smoothing: alpha=0.25 means ~4 frames to change state
-            self.occupancy_vote[tid] = 0.25 * score + 0.75 * prev
-            self.stable_occupied[tid] = self.occupancy_vote[tid] > self.occupancy_score_threshold
+            prev = self.occupancy_vote.get(tid, None)
+            self.occupancy_vote[tid] = score if prev is None else 0.10 * score + 0.90 * prev
+            was_occupied = self.stable_occupied.get(tid, False)
+            if was_occupied:
+                self.stable_occupied[tid] = self.occupancy_vote[tid] > (self.occupancy_score_threshold - 0.08)
+            else:
+                self.stable_occupied[tid] = self.occupancy_vote[tid] > (self.occupancy_score_threshold + 0.08)
 
         if self.publish_raw_stream and track_outputs:
             raw_positions = [np.asarray(tr.position, dtype=float).copy() for tr in track_outputs]
