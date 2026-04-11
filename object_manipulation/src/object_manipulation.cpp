@@ -681,6 +681,15 @@ private:
       return bt_fail("Timed out waiting for requested cupholder detection");
     }
 
+    // Reject occupied cupholders
+    if (active_holder_.occupied) {
+      RCLCPP_ERROR(
+          LOGGER,
+          "Cupholder id=%u is occupied. Please select an available cupholder.",
+          active_holder_id_);
+      return bt_fail("Requested cupholder is occupied");
+    }
+
     place_x_ = active_holder_.position.x;
     place_y_ = active_holder_.position.y;
     place_z_ = active_holder_.position.z;

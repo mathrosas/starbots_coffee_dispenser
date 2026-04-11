@@ -95,7 +95,7 @@ class ObjectDetectionNode(Node):
         self.declare_parameter("occupancy_depth_threshold_m", 0.018)  # min depth delta to call occupied
         self.declare_parameter("occupancy_depth_weight", 0.0)
         self.declare_parameter("occupancy_bright_weight", 1.0)
-        self.declare_parameter("occupancy_score_threshold", 0.35) # 0.5 should be the perfect threshold, not working right now
+        self.declare_parameter("occupancy_score_threshold", 0.40) # 0.5 should be the perfect threshold, not working right now
 
         # Marker / object geometry defaults
         self.declare_parameter("text_height_offset", 0.10)
@@ -722,10 +722,10 @@ class ObjectDetectionNode(Node):
             self.occupancy_depth_weight * depth_score
             + self.occupancy_bright_weight * bright_score
         )
-        # self.get_logger().info(
-        #     f"[occ] u={u} v={v}  depth_score={depth_score:.3f}  "
-        #     f"bright_score={bright_score:.3f}  combined={combined:.3f}"
-        # ) # Debug for cupholder detection
+        self.get_logger().info(
+            f"[occ] u={u} v={v}  depth_score={depth_score:.3f}  "
+            f"bright_score={bright_score:.3f}  combined={combined:.3f}"
+        ) # Debug for cupholder detection
         return combined  # return raw score, decision made in _image_cb
 
     def _image_cb(self, msg: Image) -> None:
