@@ -45,24 +45,6 @@ def generate_launch_description():
         ],
         arguments=["--ros-args", "--log-level", "info"],
     )
-    depth_to_points_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory("object_detection"),
-                "launch",
-                "depth_to_points.launch.py",
-            )
-        )
-    )
-    static_virtual_joint_tfs_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory("my_moveit_config"),
-                "launch",
-                "static_virtual_joint_tfs.launch.py",
-            )
-        )
-    )
     move_group_node = Node(
         package="moveit_ros_move_group",
         executable="move_group",
@@ -130,8 +112,6 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            static_virtual_joint_tfs_launch,
-            depth_to_points_launch,
             object_detection_node,
             move_group_node,
             add_scene_node,

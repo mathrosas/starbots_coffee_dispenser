@@ -29,8 +29,7 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "object_detection = object_detection.object_detection:main",
-            "pcl_qos_conv = object_detection.pcl_qos_conv:main",
+            "object_detection = object_detection.object_detection:main"
         ],
     },
 )
