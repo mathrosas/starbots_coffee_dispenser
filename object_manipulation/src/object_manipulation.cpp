@@ -1143,11 +1143,11 @@ private:
       std::lock_guard<std::mutex> lock(cupholder_mutex_);
       latest_cupholders_[msg->object_id] = *msg;
     }
-    RCLCPP_INFO(LOGGER,
-                "[CUPHOLDER_DET] id=%u pos=(%.3f, %.3f, %.3f) size=(w=%.3f, "
-                "h=%.3f, t=%.3f)",
-                msg->object_id, msg->position.x, msg->position.y,
-                msg->position.z, msg->width, msg->height, msg->thickness);
+    // RCLCPP_INFO(LOGGER,
+    //             "[CUPHOLDER_DET] id=%u pos=(%.3f, %.3f, %.3f) size=(w=%.3f, "
+    //             "h=%.3f, t=%.3f)",
+    //             msg->object_id, msg->position.x, msg->position.y,
+    //             msg->position.z, msg->width, msg->height, msg->thickness); # Debug for object detection
   }
 
   void setup_joint_value_target(float angle0, float angle1, float angle2,
