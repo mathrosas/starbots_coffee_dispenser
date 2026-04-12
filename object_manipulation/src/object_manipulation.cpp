@@ -558,7 +558,7 @@ private:
              future_result.get();
     };
 
-    auto move_to_quick_pick_like_pose = [this]() {
+    auto move_to_pregrasp_pose = [this]() {
       setup_goal_pose_target(pre_x_, pre_y_, pre_z_, -1.000, +0.000, +0.000,
                              +0.000);
       plan_trajectory_kinematics();
@@ -577,8 +577,8 @@ private:
     if (!run_pre_place_with_timeout(0.0, PRE_PLACE_PRIMARY_ATTEMPTS)) {
       try {
         clear_orientation_constraints();
-        if (!move_to_quick_pick_like_pose()) {
-          throw std::runtime_error("quick_pick_like");
+        if (!move_to_pregrasp_pose()) {
+          throw std::runtime_error("move_to_pregrasp_pose");
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
