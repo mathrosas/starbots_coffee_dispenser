@@ -722,10 +722,10 @@ class ObjectDetectionNode(Node):
             self.occupancy_depth_weight * depth_score
             + self.occupancy_bright_weight * bright_score
         )
-        self.get_logger().info(
-            f"[occ] u={u} v={v}  depth_score={depth_score:.3f}  "
-            f"bright_score={bright_score:.3f}  combined={combined:.3f}"
-        ) # Debug for cupholder detection
+        # self.get_logger().info(
+        #     f"[occ] u={u} v={v}  depth_score={depth_score:.3f}  "
+        #     f"bright_score={bright_score:.3f}  combined={combined:.3f}"
+        # ) # Debug for cupholder detection
         return combined  # return raw score, decision made in _image_cb
 
     def _image_cb(self, msg: Image) -> None:
@@ -762,6 +762,21 @@ class ObjectDetectionNode(Node):
             z, depth_conf = depth_result
             if depth_conf < self.min_depth_confidence:
                 continue
+            # Reject flat-surface artifacts (shadows): real cupholders have
+            # a depth step between center and surrounding ring; shadows don't.
+            cr = max(2, int(round(cand.radius_px * 0.40)))
+            v0c = max(0, cand.v - cr)
+            v1c = min(self.last_depth_m.shape[0] - 1, cand.v + cr)
+            u0c = max(0, cand.u - cr)
+            u1c = min(self.last_depth_m.shape[1] - 1, cand.u + cr)
+            ctr_d = self.last_depth_m[v0c:v1c+1, u0c:u1c+1].ravel()
+            ctr_d = ctr_d[
+                np.isfinite(ctr_d)
+                & (ctr_d >= self.min_depth_m)
+                & (ctr_d <= self.max_depth_m)
+            ]
+            if ctr_d.size >= 3 and abs(float(np.median(ctr_d)) - z) < 0.003:
+                continue   # flat surface → shadow, not a real cupholder
             xyz_cam = project_pixel_to_3d(cand.u, cand.v, z, self.k_matrix)
             if xyz_cam is None:
                 continue
