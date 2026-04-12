@@ -1,0 +1,58 @@
+FROM osrf/ros:humble-desktop
+SHELL [ "/bin/bash" , "-c" ]
+
+# Install ROS 2 MoveIt, perception, and Foxglove dependencies
+RUN apt update && apt upgrade -y && apt install -y \
+    python3-colcon-common-extensions \
+    python3-pcl \
+    ros-humble-pcl-* \
+    ros-humble-moveit \
+    ros-humble-moveit-ros-perception \
+    ros-humble-moveit-ros-occupancy-map-monitor \
+    ros-humble-octomap \
+    ros-humble-octomap-msgs \
+    ros-humble-ros2-control \
+    ros-humble-ros2-controllers \
+    ros-humble-joint-state-publisher \
+    ros-humble-joint-state-broadcaster \
+    ros-humble-xacro \
+    ros-humble-gazebo-ros-pkgs \
+    ros-humble-foxglove-bridge \
+    git cmake build-essential libzmq3-dev libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build BehaviorTree.CPP 4.6.2 from source
+RUN cd /tmp \
+    && git clone https://github.com/BehaviorTree/BehaviorTree.CPP.git \
+    && cd BehaviorTree.CPP \
+    && git checkout 4.6.2 \
+    && cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBTCPP_BUILD_TOOLS=ON \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build build -j"$(nproc)" \
+    && cmake --install build \
+    && rm -rf /tmp/BehaviorTree.CPP
+
+# Create ros2 workspace and copy packages
+RUN mkdir -p /home/user/ros2_ws/src
+COPY ./universal_robot_ros2/Universal_Robots_ROS2_Description \
+     /home/user/ros2_ws/src/universal_robot_ros2/Universal_Robots_ROS2_Description
+COPY ./universal_robot_ros2/robotiq_85_gripper \
+     /home/user/ros2_ws/src/universal_robot_ros2/robotiq_85_gripper
+COPY ./universal_robot_ros2/robotnik_sensors \
+     /home/user/ros2_ws/src/universal_robot_ros2/robotnik_sensors
+COPY ./my_moveit_config  /home/user/ros2_ws/src/my_moveit_config
+COPY ./object_detection  /home/user/ros2_ws/src/object_detection
+COPY ./object_manipulation /home/user/ros2_ws/src/object_manipulation
+COPY ./custom_msgs       /home/user/ros2_ws/src/custom_msgs
+COPY ./docker/ros_entrypoint.sh /ros_entrypoint.sh
+RUN chmod +x /ros_entrypoint.sh
+
+# Build the ros2 workspace
+RUN source /opt/ros/humble/setup.bash \
+    && cd /home/user/ros2_ws \
+    && colcon build --symlink-install \
+        --cmake-args -Dbehaviortree_cpp_DIR=/usr/local/lib/cmake/behaviortree_cpp
+
+WORKDIR /home/user/ros2_ws

@@ -1,0 +1,37 @@
+FROM osrf/ros:humble-desktop
+SHELL [ "/bin/bash" , "-c" ]
+
+# Install ROS 2 Gazebo dependencies
+RUN apt update && apt upgrade -y && apt install -y \
+    python3-colcon-common-extensions \
+    ros-humble-ros2-control \
+    ros-humble-ros2-controllers \
+    ros-humble-joint-state-publisher \
+    ros-humble-joint-state-broadcaster \
+    ros-humble-gazebo-ros-pkgs \
+    ros-humble-gazebo-ros2-control \
+    ros-humble-xacro \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create ros2 workspace
+RUN mkdir -p /home/user/ros2_ws/src
+COPY ./universal_robot_ros2 /home/user/ros2_ws/src/universal_robot_ros2
+COPY ./docker/ros_entrypoint.sh /ros_entrypoint.sh
+COPY ./spawn_cup.sh /home/user/ros2_ws/src/spawn_cup.sh
+RUN chmod +x /ros_entrypoint.sh /home/user/ros2_ws/src/spawn_cup.sh
+
+# Build the ros2 workspace
+RUN source /opt/ros/humble/setup.bash \
+    && cd /home/user/ros2_ws \
+    && colcon build
+
+# Set GAZEBO_MODEL_PATH for robot models and meshes
+RUN echo "export GAZEBO_MODEL_PATH=\
+/home/user/ros2_ws/src/universal_robot_ros2:\
+/home/user/ros2_ws/src/universal_robot_ros2/robotiq_85_gripper:\
+/home/user/ros2_ws/src/universal_robot_ros2/barista_ros2:\
+/home/user/ros2_ws/src/universal_robot_ros2/robotnik_sensors\
+\${GAZEBO_MODEL_PATH:+:\$GAZEBO_MODEL_PATH}" \
+    >> /home/user/ros2_ws/install/setup.bash
+
+WORKDIR /home/user/ros2_ws

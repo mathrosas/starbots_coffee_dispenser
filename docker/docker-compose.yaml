@@ -1,0 +1,50 @@
+version: '3'
+services:
+  starbots-gazebo:
+    build:
+      context: ..
+      dockerfile: docker/starbots-ros2-gazebo
+    image: starbots-coffee-dispenser:gazebo
+    container_name: starbots-ros2-gazebo
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - ROS_DOMAIN_ID=0
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    privileged: true
+    networks:
+      - starbots-network
+    restart: always
+    entrypoint: /ros_entrypoint.sh
+    command: ["ros2 launch the_construct_office_gazebo starbots_ur3e.launch.xml"]
+
+  starbots-manipulation:
+    build:
+      context: ..
+      dockerfile: docker/starbots-ros2-manipulation
+    image: starbots-coffee-dispenser:manipulation
+    container_name: starbots-ros2-manipulation
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - ROS_DOMAIN_ID=0
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    privileged: true
+    networks:
+      - starbots-network
+    ports:
+      - "1667:1667"
+      - "8765:8765"
+    restart: always
+    entrypoint: /ros_entrypoint.sh
+    command: >-
+      sleep 22
+      && ros2 launch object_manipulation deliver_cup.launch.py
+      & sleep 27
+      && ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=8765 > /dev/null 2>&1
+
+networks:
+  starbots-network:
+    driver: bridge

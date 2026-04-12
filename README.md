@@ -83,6 +83,8 @@ starbots_coffee_dispenser/
 ├── my_moveit_config/        # MoveIt 2 config for UR3e + Robotiq 85
 ├── custom_msgs/             # ROS 2 message, service, and action definitions
 ├── universal_robot_ros2/    # UR3e simulation stack, Gazebo worlds, gripper models
+├── docker/                  # Dockerfiles and docker-compose for containerized deployment
+├── spawn_cup.sh             # Spawns a coffee cup in the Gazebo simulation
 └── media/                   # Screenshots for documentation
 ```
 
@@ -427,27 +429,52 @@ Or use the Foxglove web interface to press **Order Coffee** with the desired hol
 
 ## Docker
 
-This repository includes a dockerized runtime adapted to this project.
+The project includes a two-container Docker setup that runs the entire simulation stack out of the box.
 
-From the project root:
+| Container | What it runs |
+|-----------|-------------|
+| `starbots-ros2-gazebo` | Gazebo world with UR3e and barista robot |
+| `starbots-ros2-manipulation` | MoveIt, perception, BehaviorTree executor, Foxglove bridge |
+
+### Build and run
 
 ```bash
-cd ~/ros2_ws/src/starbots_coffee_dispenser/docker
-chmod +x ros_entrypoint.sh
+cd docker/
 docker compose build
 docker compose up
 ```
 
-What this container launches:
+The manipulation container waits ~22 seconds for Gazebo to initialize before launching its stack. A Foxglove bridge starts on port **8765** shortly after.
 
-- `ros2 launch object_manipulation deliver_cup.launch.py`
-- `ros2 launch rosbridge_server rosbridge_websocket_launch.xml port:=9090`
+### Spawn a coffee cup
 
-**Important:** This container expects the Gazebo simulation to already be running in the same ROS domain. Start the simulation on the host (outside the container) before sending goals:
+Once the simulation is running, spawn a cup within the UR3e workspace:
 
 ```bash
-source ~/ros2_ws/install/setup.bash
-ros2 launch the_construct_office_gazebo starbots_ur3e.launch.xml
+docker exec starbots-ros2-gazebo bash /home/user/ros2_ws/src/spawn_cup.sh
+```
+
+### Send a delivery command
+
+```bash
+docker exec starbots-ros2-manipulation bash -c \
+  "source /home/user/ros2_ws/install/setup.bash && \
+   ros2 action send_goal /deliver_cup custom_msgs/action/DeliverCup '{cupholder_id: 1}' --feedback"
+```
+
+### Foxglove connection
+
+Connect [Foxglove Studio](https://foxglove.dev/) to monitor and control the robot:
+
+- Same machine: `ws://localhost:8765`
+- Remote server: `ws://<SERVER_IP>:8765`
+
+### X11 display forwarding
+
+Both containers forward their GUI (Gazebo, RViz) via X11. On the host, allow connections before starting:
+
+```bash
+xhost +local:docker
 ```
 
 ## Troubleshooting
