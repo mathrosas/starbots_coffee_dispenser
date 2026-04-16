@@ -161,8 +161,6 @@ private:
       collision_objects.push_back(cup);
     }
 
-    // Remove old versions first so re-running the node updates the scene
-    // cleanly.
     planning_scene_interface_->removeCollisionObjects(
         {"bartender_dispenser_body", "bartender_dispenser_top", "wall",
          "coffee_machine", "coffee_machine_back_guard", "debug_cup", "table",

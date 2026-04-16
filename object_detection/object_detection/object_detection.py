@@ -69,7 +69,7 @@ class ObjectDetectionNode(Node):
         self.declare_parameter("max_depth_age_sec", 0.50)
         self.declare_parameter("min_depth_valid_samples", 10)
         self.declare_parameter("min_depth_confidence", 0.10)
-        self.declare_parameter("min_detection_score", 0.42)
+        self.declare_parameter("min_detection_score", 0.50) # 0.42 with light
         # self.declare_parameter("min_depth_valid_samples", 24)
         # self.declare_parameter("min_depth_confidence", 0.25)
         # self.declare_parameter("min_detection_score", 0.42)

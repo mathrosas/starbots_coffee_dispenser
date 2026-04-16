@@ -67,9 +67,9 @@ static constexpr std::chrono::seconds DETECTION_RETRY_WINDOW =
     std::chrono::seconds(10);
 
 // project defaults for fixed-cup mode
-static constexpr double FIXED_CUP_X = 0.230; // 0.300
-static constexpr double FIXED_CUP_Y = 0.300; // 0.330
-static constexpr double FIXED_CUP_Z = 0.135;
+static constexpr double FIXED_CUP_X = 0.218; // 0.230
+static constexpr double FIXED_CUP_Y = 0.330; // 0.300
+static constexpr double FIXED_CUP_Z = 0.085; // 0.135
 
 class PickAndPlacePerception : public object_manipulation::BtApi {
 public:
@@ -784,7 +784,7 @@ private:
     publish_feedback(active_goal_handle_, "retreat_with_cup", 0.50f,
                      active_holder_id_);
     RCLCPP_INFO(LOGGER, "Retreating...");
-    setup_waypoints_target(+0.000, +0.000, APPROACH_Z_DELTA);
+    setup_waypoints_target(+0.000, +0.000, 3 * APPROACH_Z_DELTA);
     plan_trajectory_cartesian();
     if (!execute_trajectory_cartesian()) {
       return bt_fail("Failed Cartesian retreat");
