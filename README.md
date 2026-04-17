@@ -40,9 +40,6 @@ A ROS 2 Humble project that uses a real UR3e robotic arm with a Robotiq 85 gripp
                     │ ├──────────────────────────┤ │
                     │ │ StableTracker            │ │
                     │ │ (EMA smoothing + NN)     │ │
-                    │ ├──────────────────────────┤ │
-                    │ │ Occupancy classifier     │ │
-                    │ │ (depth + brightness)     │ │
                     │ └──────────────────────────┘ │
                     └─────────────┬────────────────┘
                                   │
@@ -94,7 +91,7 @@ An `ament_python` package that processes RGB-D camera data to detect and track c
 
 | Node | Description |
 |------|-------------|
-| `object_detection` | Main perception node: detects cup holders, classifies occupancy, publishes 3D positions |
+| `object_detection` | Main perception node: detects empty cup holders and publishes 3D positions |
 | `pcl_qos_conv` | QoS bridge that converts best-effort PointCloud2 messages to reliable QoS |
 
 **Key modules:**
@@ -102,7 +99,7 @@ An `ament_python` package that processes RGB-D camera data to detect and track c
 - `perception_core.py` - Cup holder detection using contour analysis with Hough Circle fallback
 - `tracker.py` - Multi-object tracker with EMA smoothing and nearest-neighbor matching
 - `geometry.py` - 3D point projection from depth images to robot-frame coordinates
-- `object_detection.py` - Main ROS 2 node wiring perception, tracking, occupancy classification, and TF transforms
+- `object_detection.py` - Main ROS 2 node wiring perception, tracking, and TF transforms
 
 ### `object_manipulation` - Task Execution
 
@@ -170,14 +167,9 @@ Each detection is tracked across frames by a `StableTracker`:
 - **Confirmation:** A track must persist for 3-7 consecutive frames before it is published
 - **Garbage collection:** Tracks with 6-20 missed frames are removed
 
-### Occupancy Classification
+### Empty-Only Detection
 
-Each cup holder is classified as `occupied` (cup present) or `empty` using a weighted vote of:
-
-- **Depth delta** - Measures height difference against the tray plane (threshold 0.018m)
-- **Brightness** - Analyzes mean brightness within the holder region
-
-Only empty holders are valid targets for cup placement.
+The perception pipeline publishes only empty cup holders. Candidates that look like cup tops or flat surfaces are rejected via a depth-step check between the hole center and the surrounding ring. Any detection reaching `/cup_holder_detected` is a valid target for cup placement.
 
 ![Perception output](./media/perception_annotated.png)
 
@@ -282,7 +274,6 @@ geometry_msgs/Point position      # 3D position in base_link frame
 float32 height                    # Holder dimension
 float32 width                     # Holder dimension
 float32 thickness                 # Rim thickness
-bool occupied                     # True if a cup is already present
 ```
 
 ### Message: `DetectedSurfaces`

@@ -30,7 +30,7 @@ class PerceptionConfig:
     morph_kernel_size: int = 3
     gauss_kernel_size: int = 5
     clahe_clip_limit: float = 2.0
-    hough_fallback: bool = True
+    hough_fallback: bool = False
     hough_dp: float = 1.6
     hough_min_dist: float = 20.0
     hough_param1: float = 162.0
@@ -124,34 +124,6 @@ class CupholderPerception:
             if circularity < self.cfg.min_circularity:
                 (u_dbg, v_dbg), _ = cv2.minEnclosingCircle(cnt)
                 # print(f"[DEBUG] REJECTED circularity: u={int(u_dbg)} v={int(v_dbg)} area={area:.0f} circ={circularity:.3f} min={self.cfg.min_circularity}") # Debug for cupholder detection
-                # Ellipse fallback: accept elongated cupholders seen at an angle
-                if len(cnt) >= 5:
-                    try:
-                        ellipse = cv2.fitEllipse(cnt)
-                        (eu, ev), (minor_ax, major_ax), _angle = ellipse
-                        if minor_ax > 1e-3:
-                            aspect = major_ax / minor_ax
-                            equiv_r = (minor_ax + major_ax) / 4.0
-                            # print(f"[DEBUG] ELLIPSE: u={int(round(eu))} v={int(round(ev))} aspect={aspect:.2f} equiv_r={equiv_r:.1f} pass={aspect < 2.5 and equiv_r >= self.cfg.min_radius_px * 0.5}") # Debug for cupholder detection
-                            if aspect < 2.5 and equiv_r >= self.cfg.min_radius_px * 0.5:
-                                contrast = self._circle_contrast(
-                                    proc_gray,
-                                    int(round(eu)),
-                                    int(round(ev)),
-                                    equiv_r,
-                                )
-                                shape_q = 1.0 / aspect
-                                _score = 0.50 * shape_q + 0.30 * contrast
-                                candidates.append(
-                                    Candidate2D(
-                                        u=int(round(eu)),
-                                        v=int(round(ev)),
-                                        radius_px=float(equiv_r),
-                                        score=float(np.clip(_score, 0.0, 1.0)),
-                                    )
-                                )
-                    except cv2.error:
-                        pass
                 continue
 
             (u, v), radius = cv2.minEnclosingCircle(cnt)

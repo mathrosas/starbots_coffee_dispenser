@@ -91,12 +91,6 @@ class ObjectDetectionNode(Node):
         self.declare_parameter("stable_hold_sec", 1.50)
         self.declare_parameter("stable_publish_rate_hz", 10.0)
 
-        # Occupancy classification parameters
-        self.declare_parameter("occupancy_depth_threshold_m", 0.018)  # min depth delta to call occupied
-        self.declare_parameter("occupancy_depth_weight", 0.0)
-        self.declare_parameter("occupancy_bright_weight", 1.0)
-        self.declare_parameter("occupancy_score_threshold", 0.40) # 0.5 should be the perfect threshold, not working right now
-
         # Marker / object geometry defaults
         self.declare_parameter("text_height_offset", 0.10)
         self.declare_parameter("default_hole_height", 0.05)
@@ -143,15 +137,6 @@ class ObjectDetectionNode(Node):
         )
         self.stable_publish_interval_sec = 1.0 / stable_publish_rate_hz
 
-        self.occupancy_depth_threshold_m = float(
-            self.get_parameter("occupancy_depth_threshold_m").value
-        )
-        self.occupancy_depth_weight = float(self.get_parameter("occupancy_depth_weight").value)
-        self.occupancy_bright_weight = float(self.get_parameter("occupancy_bright_weight").value)
-        self.occupancy_score_threshold = float(
-            self.get_parameter("occupancy_score_threshold").value
-        )
-
         p_cfg = PerceptionConfig(
             roi_width_ratio=float(self.get_parameter("roi_width_ratio").value),
             min_radius_px=float(self.get_parameter("min_radius_px").value),
@@ -182,8 +167,6 @@ class ObjectDetectionNode(Node):
         self.stable_radii: Dict[int, float] = {}
         self.stable_scores: Dict[int, float] = {}
         self.stable_last_seen: Dict[int, float] = {}
-        self.stable_occupied: Dict[int, bool] = {}
-        self.occupancy_vote: Dict[int, float] = {}  # running EMA score per track
         self.last_stable_pub_sec: float = 0.0
 
         self.tf_buffer = tf2_ros.Buffer()
@@ -476,11 +459,9 @@ class ObjectDetectionNode(Node):
             marker.scale.x = float(2.0 * tr.radius_m)
             marker.scale.y = float(2.0 * tr.radius_m)
             marker.scale.z = self.default_hole_height
-            is_occupied = self.stable_occupied.get(int(tr.track_id), False)
-            # green cylinder = occupied, blue cylinder = empty
-            marker.color.r = 1.0 if is_occupied else 0.0
+            marker.color.r = 0.0
             marker.color.g = 0.0
-            marker.color.b = 0.0 if is_occupied else 1.0
+            marker.color.b = 1.0
             marker.color.a = 0.7
             marker_array.markers.append(marker)
 
@@ -497,12 +478,11 @@ class ObjectDetectionNode(Node):
             text.pose.position.z = float(pos[2]) + self.text_height_offset
             text.pose.orientation.w = 1.0
             text.scale.z = 0.05
-            _is_occ = self.stable_occupied.get(int(tr.track_id), False)
-            text.color.r = 1.0 if _is_occ else 0.0
+            text.color.r = 0.0
             text.color.g = 0.0
-            text.color.b = 0.0 if _is_occ else 1.0
+            text.color.b = 1.0
             text.color.a = 1.0
-            text.text = f"{int(tr.track_id) + 1}{'O' if _is_occ else 'E'}"
+            text.text = f"{int(tr.track_id) + 1}"
             marker_array.markers.append(text)
 
         marker_pub.publish(marker_array)
@@ -525,7 +505,6 @@ class ObjectDetectionNode(Node):
             msg.width = float(2.0 * tr.radius_m)
             msg.thickness = float(2.0 * tr.radius_m)
             msg.height = self.default_hole_height
-            msg.occupied = self.stable_occupied.get(int(tr.track_id), False)
             detection_pub.publish(msg)
 
     def _annotate(self, bgr: np.ndarray, candidates: List[Candidate2D], track_outputs: List) -> np.ndarray:
@@ -535,10 +514,9 @@ class ObjectDetectionNode(Node):
             id_by_candidate[idx] = tr
 
         for i, cand in enumerate(candidates):
-            # Circle colour: green = occupied, blue = empty (grey if unconfirmed)
+            # Blue = confirmed, grey = unconfirmed
             if i in id_by_candidate and id_by_candidate[i].confirmed:
-                _occ = self.stable_occupied.get(id_by_candidate[i].track_id, False)
-                circle_color = (0, 0, 255) if _occ else (255, 0, 0)
+                circle_color = (255, 0, 0)
             else:
                 circle_color = (180, 180, 180)
             cv2.circle(out, (cand.u, cand.v), int(round(cand.radius_px)), circle_color, 2)
@@ -549,10 +527,8 @@ class ObjectDetectionNode(Node):
             color = (180, 180, 180)
             if i in id_by_candidate and id_by_candidate[i].confirmed:
                 tid = id_by_candidate[i].track_id
-                occ = self.stable_occupied.get(tid, False)
-                label = f"{tid + 1}{'O' if occ else 'E'}"
-                # green = occupied, blue = empty
-                color = (0, 0, 255) if occ else (255, 0, 0)
+                label = f"{tid + 1}"
+                color = (255, 0, 0)
                 draw_label = True
             elif self.show_unconfirmed_annotation:
                 label = "?"
@@ -640,94 +616,6 @@ class ObjectDetectionNode(Node):
 
         return stabilized_tracks, stabilized_positions
 
-    def _classify_occupancy(
-        self,
-        u: int,
-        v: int,
-        radius_px: float,
-        depth_m: np.ndarray,
-        bgr: np.ndarray,
-    ) -> bool:
-        """Return True if the cupholder appears to be occupied by a cup.
-
-        Two complementary signals are fused:
-
-        Depth signal
-            The D415 looks down at the tray.  An *empty* hole is deep – its
-            centre pixels are farther from the camera (larger z).  A cup
-            sitting inside the holder raises the surface toward the camera
-            (smaller z at the centre).  So  z_ring - z_inner > 0  when
-            occupied.
-
-        Brightness signal
-            An empty hole is dark; a cup's surface (typically light-coloured)
-            reflects more light and is brighter than the surrounding rim.
-
-        Both scores are normalised to [-1, 1] and combined with configurable
-        weights.  The result is compared against ``occupancy_score_threshold``
-        (default 0.12 – deliberately conservative so partial cups still count).
-        """
-        h, w = depth_m.shape[:2]
-        if not (0 <= u < w and 0 <= v < h):
-            return False
-
-        inner_r = max(2, int(round(radius_px * 0.50)))
-        outer_r = max(inner_r + 3, int(round(radius_px * 0.90)))
-
-        y0 = max(0, v - outer_r)
-        y1 = min(h - 1, v + outer_r)
-        x0 = max(0, u - outer_r)
-        x1 = min(w - 1, u + outer_r)
-
-        yy, xx = np.mgrid[y0:y1 + 1, x0:x1 + 1]
-        d2 = (xx - u) ** 2 + (yy - v) ** 2
-        inner_mask = d2 <= inner_r * inner_r
-        ring_mask = (d2 <= outer_r * outer_r) & ~inner_mask
-
-        # ── Depth signal ──────────────────────────────────────────────────
-        depth_score = 0.0
-        patch_d = depth_m[y0:y1 + 1, x0:x1 + 1]
-        inner_d = patch_d[inner_mask].astype(np.float32)
-        ring_d = patch_d[ring_mask].astype(np.float32)
-        inner_d = inner_d[
-            np.isfinite(inner_d)
-            & (inner_d >= self.min_depth_m)
-            & (inner_d <= self.max_depth_m)
-        ]
-        ring_d = ring_d[
-            np.isfinite(ring_d)
-            & (ring_d >= self.min_depth_m)
-            & (ring_d <= self.max_depth_m)
-        ]
-        if inner_d.size >= 5 and ring_d.size >= 5:
-            z_inner = float(np.median(inner_d))
-            z_ring = float(np.median(ring_d))
-            # Positive → inner shallower → cup present
-            depth_diff = z_ring - z_inner
-            depth_score = float(
-                np.clip(depth_diff / self.occupancy_depth_threshold_m, -1.0, 1.0)
-            )
-
-        # ── Brightness signal ─────────────────────────────────────────────
-        bright_score = 0.0
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        patch_g = gray[y0:y1 + 1, x0:x1 + 1]
-        inner_bright = float(np.mean(patch_g[inner_mask]))
-        ring_bright = float(np.mean(patch_g[ring_mask]))
-        # Positive → centre brighter → likely occupied
-        # Divide by 40 DN so a ~40-grey-level difference saturates the score.
-        bright_score = float(np.clip((inner_bright - ring_bright) / 40.0, -1.0, 1.0))
-
-        combined = (
-            self.occupancy_depth_weight * depth_score
-            + self.occupancy_bright_weight * bright_score
-        )
-        # self.get_logger().info(
-        #     f"[occ] u={u} v={v}  depth_score={depth_score:.3f}  "
-        #     f"bright_score={bright_score:.3f}  combined={combined:.3f}"
-        # ) # Debug for cupholder detection
-        return combined  # return raw score, decision made in _image_cb
-
     def _image_cb(self, msg: Image) -> None:
         if self.k_matrix is None or self.last_depth_m is None:
             return
@@ -762,8 +650,8 @@ class ObjectDetectionNode(Node):
             z, depth_conf = depth_result
             if depth_conf < self.min_depth_confidence:
                 continue
-            # Reject flat-surface artifacts (shadows): real cupholders have
-            # a depth step between center and surrounding ring; shadows don't.
+            # Reject flat-surface candidates (shadows or cup tops): a cupholder
+            # has a clear depth step between hole center and ring.
             cr = max(2, int(round(cand.radius_px * 0.40)))
             v0c = max(0, cand.v - cr)
             v1c = min(self.last_depth_m.shape[0] - 1, cand.v + cr)
@@ -776,7 +664,7 @@ class ObjectDetectionNode(Node):
                 & (ctr_d <= self.max_depth_m)
             ]
             if ctr_d.size >= 3 and abs(float(np.median(ctr_d)) - z) < 0.003:
-                continue   # flat surface → shadow, not a real cupholder
+                continue
             xyz_cam = project_pixel_to_3d(cand.u, cand.v, z, self.k_matrix)
             if xyz_cam is None:
                 continue
@@ -800,28 +688,8 @@ class ObjectDetectionNode(Node):
             detections_3d, kept_candidates
         )
 
-        # Classify occupancy for every candidate that survived filtering.
-        # kept_candidates and detections_3d are index-aligned at this point.
-        candidate_occupied: List[float] = [
-            self._classify_occupancy(cand.u, cand.v, cand.radius_px, self.last_depth_m, bgr)
-            for cand in kept_candidates
-        ]
-
         track_outputs = self.tracker.update(detections_3d)
         confirmed_tracks = self.tracker.confirmed_tracks()
-
-        # track_outputs is index-aligned with kept_candidates (same order, same
-        # length -- the tracker update preserves input order). Store per-track
-        # occupancy so _publish_detections and _annotate can read it.
-        for tr, score in zip(track_outputs, candidate_occupied):
-            tid = int(tr.track_id)
-            prev = self.occupancy_vote.get(tid, None)
-            self.occupancy_vote[tid] = score if prev is None else 0.10 * score + 0.90 * prev
-            was_occupied = self.stable_occupied.get(tid, False)
-            if was_occupied:
-                self.stable_occupied[tid] = self.occupancy_vote[tid] > (self.occupancy_score_threshold - 0.08)
-            else:
-                self.stable_occupied[tid] = self.occupancy_vote[tid] > (self.occupancy_score_threshold + 0.08)
 
         if self.publish_raw_stream and track_outputs:
             raw_positions = [np.asarray(tr.position, dtype=float).copy() for tr in track_outputs]
