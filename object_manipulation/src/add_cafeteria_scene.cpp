@@ -112,6 +112,10 @@ private:
         // Therefore center z in Gazebo world = 0.5 + 0.5 = 1.0
         {"bartender_dispenser_top", 0.85, 1.81, 0.05, 14.20, -18.20, 1.00, 0.0},
 
+        // Conservative approximation of the laboratory fixture attached to the
+        // right side of the dispenser table
+        {"side_guard", 0.15, 0.35, 0.15, 13.75, -18.10, 1.00, 0.00},
+
         // Table top center in world: (14.20, -18.20, 1.00)
         // Table top size: 0.85 x 1.81 x 0.05
         // Rear edge y = -18.20 - 1.81/2 = -19.105
@@ -161,10 +165,12 @@ private:
       collision_objects.push_back(cup);
     }
 
+    // Remove old versions first so re-running the node updates the scene
+    // cleanly.
     planning_scene_interface_->removeCollisionObjects(
         {"bartender_dispenser_body", "bartender_dispenser_top", "wall",
-         "coffee_machine", "coffee_machine_back_guard", "debug_cup", "table",
-         "cup"});
+         "side_guard", "coffee_machine", "coffee_machine_back_guard",
+         "debug_cup", "table", "cup"});
 
     rclcpp::sleep_for(250ms);
 

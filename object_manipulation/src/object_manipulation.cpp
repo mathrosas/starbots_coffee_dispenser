@@ -536,7 +536,7 @@ private:
       return BT::NodeStatus::SUCCESS;
     });
 
-    if (future_result.wait_for(std::chrono::seconds(90)) !=
+    if (future_result.wait_for(std::chrono::seconds(120)) !=
             std::future_status::ready ||
         future_result.get() != BT::NodeStatus::SUCCESS) {
       move_group_robot_->stop();
@@ -553,7 +553,7 @@ private:
             return bt_move_pre_place(retry_lift, max_attempts) ==
                    BT::NodeStatus::SUCCESS;
           });
-      return future_result.wait_for(std::chrono::seconds(90)) ==
+      return future_result.wait_for(std::chrono::seconds(120)) ==
                  std::future_status::ready &&
              future_result.get();
     };
