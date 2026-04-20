@@ -22,7 +22,7 @@ class PerceptionConfig:
     max_radius_px: float = 20.0
     min_contour_area: float = 120.0
     max_contour_area: float = 2200.0
-    min_circularity: float = 0.58
+    min_circularity: float = 0.75
     max_candidates: int = 4
     min_center_distance_px: float = 18.0
     adaptive_block_size: int = 31
