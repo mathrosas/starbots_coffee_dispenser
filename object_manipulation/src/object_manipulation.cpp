@@ -59,10 +59,9 @@ static const std::string DEFAULT_BT_XML_REL_PATH =
 static constexpr double PREGRASP_Z_OFFSET = 0.25; // 25 cm above detected object
 static constexpr double APPROACH_Z_DELTA = 0.10;  // straight down
 static constexpr double PLACE_RETRY_Z_STEP = 0.005; // pre-place retry step
-static constexpr int DETECTION_MAX_ATTEMPTS = 5;
-static constexpr int PRE_PLACE_PRIMARY_ATTEMPTS = 5;
-static constexpr int PRE_PLACE_RECOVERY_ATTEMPTS = 5;
-static constexpr int PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS = 5;
+static constexpr int DETECTION_MAX_ATTEMPTS = 2;
+static constexpr int PRE_PLACE_ATTEMPTS = 2;
+static constexpr int PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS = 2;
 static constexpr std::chrono::seconds DETECTION_RETRY_WINDOW =
     std::chrono::seconds(10);
 
@@ -558,13 +557,6 @@ private:
              future_result.get();
     };
 
-    auto move_to_pregrasp_pose = [this]() {
-      setup_goal_pose_target(pre_x_, pre_y_, pre_z_, -1.000, +0.000, +0.000,
-                             +0.000);
-      plan_trajectory_kinematics();
-      return execute_trajectory_kinematics();
-    };
-
     if (!bt_rotated_to_place_) {
       //   clear_orientation_constraints();
       //   if (bt_rotate_to_place() != BT::NodeStatus::SUCCESS) {
@@ -574,27 +566,10 @@ private:
     }
 
     apply_orientation_constraints();
-    if (!run_pre_place_with_timeout(0.0, PRE_PLACE_PRIMARY_ATTEMPTS)) {
-      try {
-        clear_orientation_constraints();
-        if (!move_to_pregrasp_pose()) {
-          throw std::runtime_error("pregrasp_pose");
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-        if (is_cancel_requested(active_goal_handle_)) {
-          throw std::runtime_error("canceled");
-        }
-
-        apply_orientation_constraints();
-        if (!run_pre_place_with_timeout(0.0, PRE_PLACE_RECOVERY_ATTEMPTS)) {
-          throw std::runtime_error("pre_place");
-        }
-      } catch (const std::exception &) {
-        move_group_robot_->stop();
-        clear_orientation_constraints();
-        return bt_fail("Attempt to reach pre-place failed or timed out");
-      }
+    if (!run_pre_place_with_timeout(0.0, PRE_PLACE_ATTEMPTS)) {
+      move_group_robot_->stop();
+      clear_orientation_constraints();
+      return bt_fail("Attempt to reach pre-place failed or timed out");
     }
 
     clear_orientation_constraints();

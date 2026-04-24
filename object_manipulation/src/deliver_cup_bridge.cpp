@@ -162,7 +162,8 @@ private:
               }
             } else if (result.code == rclcpp_action::ResultCode::ABORTED) {
               state->success = false;
-              state->message = "DeliverCup aborted";
+              state->message = "DeliverCup aborted due to unreachable goal. "
+                               "Pick another cupholder_id.";
             } else if (result.code == rclcpp_action::ResultCode::CANCELED) {
               state->success = false;
               state->message = "DeliverCup canceled";
