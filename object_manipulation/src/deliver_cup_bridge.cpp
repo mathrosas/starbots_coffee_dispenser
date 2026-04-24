@@ -162,11 +162,20 @@ private:
               }
             } else if (result.code == rclcpp_action::ResultCode::ABORTED) {
               state->success = false;
-              state->message = "DeliverCup aborted due to unreachable goal. "
-                               "Pick another cupholder_id.";
+              if (result.result && !result.result->message.empty()) {
+                state->message =
+                    "DeliverCup aborted: " + result.result->message;
+              } else {
+                state->message = "DeliverCup aborted";
+              }
             } else if (result.code == rclcpp_action::ResultCode::CANCELED) {
               state->success = false;
-              state->message = "DeliverCup canceled";
+              if (result.result && !result.result->message.empty()) {
+                state->message =
+                    "DeliverCup canceled: " + result.result->message;
+              } else {
+                state->message = "DeliverCup canceled";
+              }
             } else {
               state->success = false;
               state->message = "DeliverCup returned unknown result";

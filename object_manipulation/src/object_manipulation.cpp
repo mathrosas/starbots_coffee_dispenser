@@ -60,8 +60,8 @@ static constexpr double PREGRASP_Z_OFFSET = 0.25; // 25 cm above detected object
 static constexpr double APPROACH_Z_DELTA = 0.10;  // straight down
 static constexpr double PLACE_RETRY_Z_STEP = 0.005; // pre-place retry step
 static constexpr int DETECTION_MAX_ATTEMPTS = 2;
-static constexpr int PRE_PLACE_ATTEMPTS = 2;
-static constexpr int PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS = 2;
+static constexpr int PRE_PLACE_ATTEMPTS = 3;
+static constexpr int PUTBACK_MOVE_ABOVE_FIXED_MAX_ATTEMPTS = 3;
 static constexpr std::chrono::seconds DETECTION_RETRY_WINDOW =
     std::chrono::seconds(10);
 
@@ -217,6 +217,7 @@ public:
     bt_place_failed_ = false;
     bt_rotated_to_place_ = false;
     bt_cup_released_ = false;
+    bt_cup_returned_to_tray_ = false;
     clear_orientation_constraints();
 
     halt_bt_tree();
@@ -285,6 +286,18 @@ private:
   Pose target_pose_robot_;
   bool plan_success_robot_{false};
 
+  // Tracks the kind of failure produced by the last motion attempt so the BT
+  // can distinguish "unreachable" (planner could not find a path) from
+  // "execution failed" (controller aborted mid-motion, arm got stuck, etc.).
+  enum class MotionFailure {
+    NONE,
+    PLANNING, // unreachable / no valid plan
+    EXECUTION // trajectory failed mid-motion (stuck, collision, controller
+              // abort)
+  };
+  MotionFailure last_motion_failure_{MotionFailure::NONE};
+  int32_t last_exec_code_{0};
+
   std::vector<double> joint_group_positions_gripper_;
   RobotStatePtr current_state_gripper_;
   Plan gripper_trajectory_plan_;
@@ -301,6 +314,7 @@ private:
   bool bt_enable_groot_{true};
   BT::BehaviorTreeFactory bt_factory_;
   BT::Tree bt_tree_;
+  bool bt_cup_returned_to_tray_{false};
   std::unique_ptr<BT::Groot2Publisher> bt_groot_publisher_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr bt_status_pub_;
   bool bt_tree_ready_{false};
@@ -569,7 +583,25 @@ private:
     if (!run_pre_place_with_timeout(0.0, PRE_PLACE_ATTEMPTS)) {
       move_group_robot_->stop();
       clear_orientation_constraints();
-      return bt_fail("Attempt to reach pre-place failed or timed out");
+
+      std::ostringstream oss;
+      if (last_motion_failure_ == MotionFailure::PLANNING) {
+        publish_feedback(active_goal_handle_, "cupholder_unreachable", 0.0f,
+                         active_holder_id_);
+        oss << "UNREACHABLE: cupholder " << active_holder_id_
+            << " has no valid plan to the pre-place pose. Choose another "
+               "cupholder.";
+      } else if (last_motion_failure_ == MotionFailure::EXECUTION) {
+        publish_feedback(active_goal_handle_, "execution_failed", 0.0f,
+                         active_holder_id_);
+        oss << "EXECUTION_FAILED: arm got stuck while moving to pre-place for "
+               "cupholder "
+            << active_holder_id_ << " (MoveIt code=" << last_exec_code_ << ").";
+      } else {
+        oss << "Attempt to reach pre-place failed or timed out for cupholder "
+            << active_holder_id_ << ".";
+      }
+      return bt_fail(oss.str());
     }
 
     clear_orientation_constraints();
@@ -611,8 +643,11 @@ private:
     if (status != BT::NodeStatus::SUCCESS) {
       move_group_robot_->stop();
       clear_orientation_constraints();
-      return bt_fail("Put-back failed");
+      RCLCPP_ERROR(LOGGER, "Put-back failed (root cause preserved: %s)",
+                   bt_failure_reason_.c_str());
+      return BT::NodeStatus::FAILURE;
     }
+    bt_cup_returned_to_tray_ = true;
     clear_orientation_constraints();
     return BT::NodeStatus::SUCCESS;
   }
@@ -620,13 +655,18 @@ private:
   BT::NodeStatus bt_return() {
     clear_orientation_constraints();
 
-    // End every attempt at the home pose.
     if (bt_return_home() != BT::NodeStatus::SUCCESS) {
       return bt_fail("Failed final return to home pose");
     }
 
     if (bt_place_failed_) {
-      return bt_fail("Place failed: cup was put back to fixed pick position.");
+      const std::string root = bt_failure_reason_.empty()
+                                   ? std::string("Place failed")
+                                   : bt_failure_reason_;
+      const std::string putback =
+          bt_cup_returned_to_tray_ ? " Cup was put back to fixed pick position."
+                                   : " Cup could not be put back to the tray.";
+      return bt_fail(root + putback);
     }
     return BT::NodeStatus::SUCCESS;
   }
@@ -1196,19 +1236,23 @@ private:
   }
 
   bool execute_trajectory_kinematics() {
-    if (plan_success_robot_) {
-      log_ee_and_joints("pre_execute_kinematics");
-      auto code = move_group_robot_->execute(kinematics_trajectory_plan_);
-      if (code != moveit::core::MoveItErrorCode::SUCCESS) {
-        RCLCPP_ERROR(LOGGER, "Robot Kinematics Trajectory Execute Failed !");
-        return false;
-      }
-      RCLCPP_INFO(LOGGER, "Robot Kinematics Trajectory Success !");
-      log_ee_and_joints("post_execute_kinematics");
-      return true;
+    if (!plan_success_robot_) {
+      last_motion_failure_ = MotionFailure::PLANNING;
+      RCLCPP_ERROR(LOGGER, "Robot Kinematics Trajectory Planning Failed !");
+      return false;
     }
-    RCLCPP_ERROR(LOGGER, "Robot Kinematics Trajectory Planning Failed !");
-    return false;
+    log_ee_and_joints("pre_execute_kinematics");
+    auto code = move_group_robot_->execute(kinematics_trajectory_plan_);
+    if (code != moveit::core::MoveItErrorCode::SUCCESS) {
+      last_motion_failure_ = MotionFailure::EXECUTION;
+      last_exec_code_ = code.val;
+      RCLCPP_ERROR(LOGGER, "Robot Kinematics Trajectory Execute Failed !");
+      return false;
+    }
+    last_motion_failure_ = MotionFailure::NONE;
+    RCLCPP_INFO(LOGGER, "Robot Kinematics Trajectory Success !");
+    log_ee_and_joints("post_execute_kinematics");
+    return true;
   }
 
   void setup_waypoints_target(float x_delta, float y_delta, float z_delta) {
@@ -1232,19 +1276,23 @@ private:
   }
 
   bool execute_trajectory_cartesian() {
-    if (plan_fraction_robot_ >= 0.0) {
-      log_ee_and_joints("pre_execute_cartesian");
-      auto code = move_group_robot_->execute(cartesian_trajectory_plan_);
-      if (code != moveit::core::MoveItErrorCode::SUCCESS) {
-        RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Execute Failed !");
-        return false;
-      }
-      RCLCPP_INFO(LOGGER, "Robot Cartesian Trajectory Success !");
-      log_ee_and_joints("post_execute_cartesian");
-      return true;
+    if (plan_fraction_robot_ < 0.0) {
+      last_motion_failure_ = MotionFailure::PLANNING;
+      RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Planning Failed !");
+      return false;
     }
-    RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Planning Failed !");
-    return false;
+    log_ee_and_joints("pre_execute_cartesian");
+    auto code = move_group_robot_->execute(cartesian_trajectory_plan_);
+    if (code != moveit::core::MoveItErrorCode::SUCCESS) {
+      last_motion_failure_ = MotionFailure::EXECUTION;
+      last_exec_code_ = code.val;
+      RCLCPP_ERROR(LOGGER, "Robot Cartesian Trajectory Execute Failed !");
+      return false;
+    }
+    last_motion_failure_ = MotionFailure::NONE;
+    RCLCPP_INFO(LOGGER, "Robot Cartesian Trajectory Success !");
+    log_ee_and_joints("post_execute_cartesian");
+    return true;
   }
 
   void setup_named_pose_gripper(std::string pose_name) {
