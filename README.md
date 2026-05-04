@@ -4,7 +4,7 @@
 
 A ROS 2 Humble project that uses a real UR3e robotic arm with a Robotiq 85 gripper to autonomously detect cup holders on a barista robot, pick up coffee cups, and deliver them to a specified holder. The system integrates computer vision, motion planning, and a behavior tree-based task executor, all monitored through a Foxglove web interface.
 
-![Lab setup](./media/lab_setup.png)
+![Lab setup](./media/test_gif.gif)
 
 ## Table of Contents
 
@@ -69,7 +69,7 @@ A ROS 2 Humble project that uses a real UR3e robotic arm with a Robotiq 85 gripp
                       └────────────────────────┘
 ```
 
-![RViz planning](./media/rviz_planning.png)
+![RViz planning](./media/sim_rviz_gif.gif)
 
 ## Packages Overview
 
@@ -242,7 +242,7 @@ The project uses [Foxglove Studio](https://foxglove.dev/) as its web-based monit
 2. Connect to the robot via `rosbridge` or `foxglove_bridge`
 3. Import `foxglove_webapp.json` from the **Layout** menu
 
-![Foxglove dashboard](./media/foxglove_dashboard.png)
+![Foxglove dashboard](./media/foxglove_gif.gif)
 
 ## Custom ROS 2 Interfaces
 
