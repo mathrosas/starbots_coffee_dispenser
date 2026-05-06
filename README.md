@@ -6,7 +6,7 @@ A ROS 2 Humble project that uses a real UR3e robotic arm with a Robotiq 85 gripp
 
 ![Lab setup](./media/test_gif.gif)
 
-## 📺 Project Presentation
+## Project Presentation
 
 Watch the full project walkthrough and demo on YouTube: **[Starbots Coffee Cup Dispenser - Presentation](https://www.youtube.com/watch?v=bS63SqsP7mw&t=14s)**
 
