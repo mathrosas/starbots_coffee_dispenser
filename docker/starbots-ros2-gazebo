@@ -18,6 +18,13 @@ RUN mkdir -p /home/user/ros2_ws/src
 COPY ./universal_robot_ros2 /home/user/ros2_ws/src/universal_robot_ros2
 COPY ./docker/ros_entrypoint.sh /ros_entrypoint.sh
 COPY ./spawn_cup.sh /home/user/ros2_ws/src/spawn_cup.sh
+COPY ./docker/start-staged.sh /usr/local/bin/start-staged.sh
+RUN chmod +x /usr/local/bin/start-staged.sh
+# Bundle Gazebo models so the simulation does not depend on downloads
+COPY ./docker/gazebo_models/ /opt/starbots/gazebo_models/
+# Use bundled models and disable the remote Gazebo model database
+ENV GAZEBO_MODEL_PATH=/opt/starbots/gazebo_models
+ENV GAZEBO_MODEL_DATABASE_URI=""
 RUN chmod +x /ros_entrypoint.sh /home/user/ros2_ws/src/spawn_cup.sh
 
 # Build the ros2 workspace
