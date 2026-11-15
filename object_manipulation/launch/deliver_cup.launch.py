@@ -102,21 +102,12 @@ def generate_launch_description():
         actions=[object_manipulation_node],
     )
 
-    deliver_cup_bridge_node = Node(
-        package="object_manipulation",
-        executable="deliver_cup_bridge",
-        name="deliver_cup_bridge",
-        output="screen",
-        parameters=[{"use_sim_time": True}],
-    )
-
     return LaunchDescription(
         [
             object_detection_node,
             move_group_node,
             add_scene_node,
             rviz_node,
-            deliver_cup_bridge_node,
             delayed_object_manipulation_node,
         ]
     )

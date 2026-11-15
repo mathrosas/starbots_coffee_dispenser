@@ -225,20 +225,16 @@ The main command interface is the `/deliver_cup` action, which accepts a target 
 
 ## Web Interface (Foxglove)
 
-The project supports [Foxglove Studio](https://foxglove.dev/) as an optional web-based monitoring and control interface, connected via `rosbridge_server`.
+The project can use [Foxglove Studio](https://foxglove.dev/) for monitoring. The Docker Compose configuration starts **Foxglove Bridge** on port **8765** (rather than rosbridge on port 9090); check its logs if connection fails. Connect to `ws://localhost:8765` on the same machine or `ws://<SERVER_IP>:8765` from another machine.
 
-When running through Docker (see [Docker](#docker)), the container automatically starts a `rosbridge_websocket` on port 9090. Connect Foxglove to:
-
-- Same machine: `ws://localhost:9090`
-- Remote server: `ws://<SERVER_IP>:9090`
-- The Construct tunnel: use the URL returned by `rosbridge_address`
+Coffee delivery is exposed through the `/deliver_cup` **ROS 2 action**, which can be invoked from a terminal. The older, unfinished service bridge is not built.
 
 **Available panels:**
 
 | Panel | Description |
 |-------|-------------|
 | **3D Visualization** | Robot model, cup holder markers, TF frames |
-| **Order Coffee** | Service call button to trigger `/deliver_cup` with a target holder ID |
+| **Order Coffee** | Direct ROS 2 action via CLI; a Foxglove service button would need an additional service bridge |
 | **Robot Status** | Live feedback from `/robot_status_feedback` |
 | **Barista Tray Detections** | Annotated camera stream from `/barista_cam_annotated` |
 | **ROS Logs** | Filtered `/rosout` log viewer |
@@ -429,60 +425,146 @@ Or use the Foxglove web interface to press **Order Coffee** with the desired hol
 
 ## Docker
 
-The project includes a two-container Docker setup that runs the entire simulation stack out of the box.
+The project uses the original **two-container Docker Compose architecture**:
 
 | Container | What it runs |
 |-----------|-------------|
-| `starbots-ros2-gazebo` | Gazebo world with UR3e and barista robot |
-| `starbots-ros2-manipulation` | MoveIt, perception, BehaviorTree executor, Foxglove bridge |
+| `starbots-ros2-gazebo` | Gazebo Classic, the UR3e and its controllers, and the barista robot |
+| `starbots-ros2-manipulation` | MoveIt 2, RViz, object detection, the BehaviorTree action server, and Foxglove Bridge |
 
-### Build and run
+The Gazebo container uses `docker/start-staged.sh` to spawn the world, UR3e and barista in stages and verify that all three UR3e controllers are active. The manipulation container uses the **original** Compose startup command: it waits 22 seconds before starting `deliver_cup.launch.py`, and starts Foxglove Bridge after another delay. These delays are not a Gazebo-readiness check; on slower machines, manipulation may start too early.
 
-```bash
-cd docker/
-docker compose build
-docker compose up
+### Linux NVIDIA / X11 GUI setup (local override)
+
+Gazebo and RViz need access to the host's X11 display. The following is the **locally tested** NVIDIA/X11 setup; it is host-specific and should not be committed with machine-specific values.
+
+Create `docker/.env` with the correct values for your machine. For example (the paths and display number may differ):
+
+```dotenv
+DISPLAY=:1
+XAUTHORITY=/run/user/1000/gdm/Xauthority
+HOST_HOSTNAME=mainframe
 ```
 
-The manipulation container waits ~22 seconds for Gazebo to initialize before launching its stack. A Foxglove bridge starts on port **8765** shortly after.
+Create `docker/gui.local.yaml`:
+
+```yaml
+services:
+  starbots-gazebo:
+    hostname: ${HOST_HOSTNAME}
+    gpus: all
+    privileged: false
+    restart: "no"
+    environment:
+      XAUTHORITY: /tmp/host.Xauthority
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics,display
+      __GLX_VENDOR_LIBRARY_NAME: nvidia
+    volumes:
+      - "${XAUTHORITY}:/tmp/host.Xauthority:ro"
+
+  starbots-manipulation:
+    gpus: all
+    environment:
+      XAUTHORITY: /tmp/host.Xauthority
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics,display
+      __GLX_VENDOR_LIBRARY_NAME: nvidia
+    volumes:
+      - "${XAUTHORITY}:/tmp/host.Xauthority:ro"
+```
+
+Check that the `XAUTHORITY` file exists and is readable. Both `.env` and `gui.local.yaml` contain local configuration; keep them out of commits.
+
+### Build the images
+
+From the repository root:
+
+```bash
+cd docker
+sudo docker compose -f docker-compose.yaml -f gui.local.yaml build
+```
+
+Only rebuild when dependencies or application source files change.
+
+### Start both containers (original Compose method)
+
+```bash
+cd docker
+sudo docker compose -f docker-compose.yaml -f gui.local.yaml config --quiet
+sudo docker compose -f docker-compose.yaml -f gui.local.yaml up --no-build
+```
+
+This starts **both services**. Once built, there is no need to launch Gazebo or the manipulation ROS nodes manually in separate terminals. Wait until Gazebo prints `STARBOTS SIMULATION READY` and the manipulation logs show that the `/deliver_cup` action server is initialized before requesting a delivery.
+
+The Compose `version` deprecation warning is harmless. To run in the background, use `up -d --no-build`; inspect logs with `sudo docker compose -f docker-compose.yaml -f gui.local.yaml logs -f`.
 
 ### Spawn a coffee cup
 
-Once the simulation is running, spawn a cup within the UR3e workspace:
+Before testing the physical grasp, ensure there is a coffee cup in the simulation. The repository provides a cup-spawning script:
 
 ```bash
-docker exec starbots-ros2-gazebo bash /home/user/ros2_ws/src/spawn_cup.sh
+sudo docker exec starbots-ros2-gazebo bash /home/user/ros2_ws/src/spawn_cup.sh
 ```
 
-### Send a delivery command
+Do not spawn repeated cups at the same location without resetting the simulation.
+
+### Request delivery to cup holder 1
+
+In another terminal, while both containers are running:
 
 ```bash
-docker exec starbots-ros2-manipulation bash -c \
-  "source /home/user/ros2_ws/install/setup.bash && \
-   ros2 action send_goal /deliver_cup custom_msgs/action/DeliverCup '{cupholder_id: 1}' --feedback"
+sudo docker exec starbots-ros2-manipulation bash -lc '
+  source /opt/ros/humble/setup.bash
+  source /home/user/ros2_ws/install/setup.bash
+
+  ros2 action send_goal \
+    /deliver_cup \
+    custom_msgs/action/DeliverCup \
+    "{cupholder_id: 1}" \
+    --feedback
+'
 ```
+
+This calls the existing ROS 2 **action** server, not a service. The optional `deliver_cup_bridge` service executable is currently excluded because its source file is absent; the direct action is functional.
+
+### Stop, reset and repeat a test
+
+To restore the initial Gazebo state and restart both containers without rebuilding:
+
+```bash
+cd docker
+sudo docker compose -f docker-compose.yaml -f gui.local.yaml down
+sudo docker compose -f docker-compose.yaml -f gui.local.yaml up --no-build
+```
+
+After startup, spawn the cup if needed and send the action again. Restarting is recommended when a previous attempt left the arm or cup displaced.
 
 ### Foxglove connection
 
-Connect [Foxglove Studio](https://foxglove.dev/) to monitor and control the robot:
+The existing manipulation Compose command launches Foxglove Bridge on port **8765**, exposed to the host:
 
 - Same machine: `ws://localhost:8765`
-- Remote server: `ws://<SERVER_IP>:8765`
+- Remote machine: `ws://<SERVER_IP>:8765`
 
-### X11 display forwarding
+RViz and Gazebo also open through X11 when the local override is configured correctly. The Foxglove connection itself should be verified separately.
 
-Both containers forward their GUI (Gazebo, RViz) via X11. On the host, allow connections before starting:
+### Known limitations (integration test, November 2026)
 
-```bash
-xhost +local:docker
-```
+- Both Docker images build, Gazebo and RViz start, and the `/deliver_cup` action is accepted with live feedback.
+- MoveIt 2 recognizes the arm and gripper controllers, and the simulated robot performs the delivery movement sequence.
+- The robot did **not** physically grasp the cup during the observed test. A successful gripper command does not prove a physical grasp.
+- The observed action ended with `success: false`, `Failed final return to home pose` (status `ABORTED`). The exact planning or execution root cause has not yet been established.
+- The original fixed startup delays are preserved. If manipulation starts before Gazebo is ready, retry a clean startup or inspect the manipulation logs; no new orchestration mechanism is included here.
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| `/deliver_cup` does nothing | Verify controllers are `active` with `ros2 control list_controllers`, check `/joint_states` is publishing, relaunch the manipulation launch file |
-| No camera topics | Ensure the Gazebo simulation has fully spawned, then check depth/camera topics with `ros2 topic list` |
-| Detection not publishing | Verify camera sensor data is streaming with `ros2 topic list` |
-| First Gazebo launch fails | Relaunch once — this is a known intermittent behavior |
-| Simulation behaves unstable | Wait until Gazebo fully spawns both robots before sending action goals |
+| Problem | What to check |
+|---------|---------------|
+| `sleep: missing operand` and the manipulation container restarts | Ensure the manipulation `command:` is a YAML list containing one complete shell-command string, as in `docker/docker-compose.yaml`. |
+| RViz cannot connect to display | Check `DISPLAY`, `XAUTHORITY`, the Xauthority file mount, and NVIDIA graphics support in `gui.local.yaml`. |
+| `/deliver_cup` action unavailable | Check manipulation logs and wait until the action server initializes; confirm both containers can discover ROS 2 nodes. |
+| No camera topics or detections | Confirm Gazebo has spawned the UR3e and barista and that the camera topics publish data. |
+| Cup not physically picked up | Confirm the cup exists in Gazebo; investigate grasp geometry and physics separately from action feedback. |
+| Final return-home motion fails | Inspect MoveIt logs to distinguish a planning failure from a trajectory-execution failure; the cause has not been verified. |
+| Manipulation starts before Gazebo is ready | The original Compose startup uses fixed delays, not a full readiness check. |

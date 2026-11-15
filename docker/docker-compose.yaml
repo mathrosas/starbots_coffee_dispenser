@@ -39,11 +39,8 @@ services:
       - "8765:8765"
     restart: always
     entrypoint: /ros_entrypoint.sh
-    command: >-
-      sleep 22
-      && ros2 launch object_manipulation deliver_cup.launch.py
-      & sleep 27
-      && ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=8765 > /dev/null 2>&1
+    command:
+      - "sleep 22 && ros2 launch object_manipulation deliver_cup.launch.py & sleep 27 && ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=8765 > /dev/null 2>&1"
 
 networks:
   starbots-network:

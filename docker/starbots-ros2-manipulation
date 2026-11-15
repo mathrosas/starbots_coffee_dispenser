@@ -7,6 +7,7 @@ RUN apt update && apt upgrade -y && apt install -y \
     python3-pcl \
     ros-humble-pcl-* \
     ros-humble-moveit \
+    ros-humble-moveit-visual-tools \
     ros-humble-moveit-ros-perception \
     ros-humble-moveit-ros-occupancy-map-monitor \
     ros-humble-octomap \
